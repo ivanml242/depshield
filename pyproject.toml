@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "depshield"
+version = "0.1.0"
+description = "CLI tool to detect malicious dependencies in npm and PyPI projects before installation"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Ivan"},
+]
+keywords = ["security", "supply-chain", "dependencies", "malware", "npm", "pypi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Security",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+]
+
+dependencies = [
+    "requests",
+    "click",
+    "rich",
+    "esprima",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[project.scripts]
+depshield = "depshield.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that make real API calls (deselect with '-m \"not integration\"')",
+    "benchmark: benchmark comparison tests (deselect with '-m \"not benchmark\"')",
+]
