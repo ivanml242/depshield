@@ -1,233 +1,198 @@
-# Guia de configuracion del entorno - depshield
+# Guia de configuracion del entorno - depshield (Windows)
 
 **LEEME ENTERO ANTES DE HACER NADA. Sigue los pasos EN ORDEN.**
 
-Este proyecto requiere **Python 3.11 o superior**. Si tienes Python 3.9 o 3.10, NO va a funcionar.
-A continuacion te explico como comprobar tu version, instalar la correcta si hace falta, y dejarlo todo listo.
+Este proyecto requiere **Python 3.11 o superior**.
 
 ---
 
-## PASO 1: Comprobar que version de Python tienes
+## PASO 1: Comprobar si tienes Python 3.11+
 
-Abre una terminal y ejecuta estos tres comandos (los tres, uno por uno):
+Abre **PowerShell** (busca "PowerShell" en el menu de inicio) y ejecuta:
 
-```bash
-python3 --version
+```powershell
+python --version
 ```
 
-```bash
-python3.11 --version
-```
+**Resultados posibles:**
 
-```bash
-python3.12 --version
-```
-
-**Interpreta los resultados:**
-
-- Si `python3 --version` dice **3.11.x** o **3.12.x** o **3.13.x** -> Perfecto, ya lo tienes. Ve al PASO 2.
-- Si `python3.11 --version` o `python3.12 --version` funciona (no dice "command not found") -> Lo tienes instalado pero no es el default. Ve al PASO 2 y usa `python3.11` o `python3.12` en vez de `python3`.
-- Si TODOS dicen version 3.9 o 3.10, o dicen "command not found" -> Necesitas instalar Python. Ve al PASO 1b.
+- Dice **Python 3.11.x**, **3.12.x** o **3.13.x** -> Perfecto, salta al PASO 3.
+- Dice **Python 3.9.x** o **3.10.x** -> Necesitas instalar una version nueva. Ve al PASO 2.
+- Dice **"command not found"** o abre la Microsoft Store -> No tienes Python. Ve al PASO 2.
 
 ---
 
-## PASO 1b: Instalar Python 3.12 (solo si NO lo tienes)
+## PASO 2: Instalar Python 3.12 (solo si NO tienes 3.11+)
 
-### En macOS (con Homebrew):
+1. Abre este enlace en tu navegador:
 
-Si tienes Homebrew instalado (ejecuta `brew --version` para comprobarlo):
+   **https://www.python.org/downloads/**
 
-```bash
-brew install python@3.12
+2. Descarga el instalador de **Python 3.12.x** (el boton amarillo grande).
+
+3. Ejecuta el instalador. **EN LA PRIMERA PANTALLA**, ANTES de darle a Install:
+
+   **MARCA LA CASILLA "Add python.exe to PATH"** (abajo del todo).
+
+   Si no marcas esa casilla, nada va a funcionar despues.
+
+4. Dale a **"Install Now"**.
+
+5. Cuando termine, **CIERRA PowerShell y abre uno nuevo** (esto es importante para que el PATH se actualice).
+
+6. Comprueba que funciono:
+
+```powershell
+python --version
 ```
 
-Despues de instalar, comprueba:
-
-```bash
-python3.12 --version
-```
-
-Deberia decir `Python 3.12.x`.
-
-**Si NO tienes Homebrew**, instalalo primero:
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-**IMPORTANTE para macOS con chip Apple Silicon (M1/M2/M3):** Despues de instalar Homebrew, la terminal te va a mostrar unas lineas que dicen "Add Homebrew to your PATH". **TIENES QUE EJECUTAR ESAS LINEAS** o Homebrew no funcionara. Normalmente son algo como:
-
-```bash
-echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
-eval "$(/opt/homebrew/bin/brew shellenv)"
-```
-
-Despues de eso, ejecuta `brew install python@3.12`.
-
-### En Linux (Ubuntu/Debian):
-
-```bash
-sudo apt update
-sudo apt install python3.12 python3.12-venv python3.12-dev
-```
-
-### En Windows:
-
-Descarga el instalador de https://www.python.org/downloads/ (version 3.12.x).
-**IMPORTANTE**: En el instalador, marca la casilla **"Add Python to PATH"** antes de darle a Install.
+Debe decir `Python 3.12.x`. Si sigue diciendo 3.9 o 3.10, ve a la seccion de problemas al final.
 
 ---
 
-## PASO 2: Clonar el repositorio (si no lo tienes ya)
+## PASO 3: Clonar el repositorio
 
-```bash
+Si ya lo tienes clonado, salta al PASO 4.
+
+```powershell
 git clone https://github.com/ivanml242/depshield.git
 cd depshield
 ```
 
-Si ya lo tienes clonado, simplemente entra en la carpeta:
-
-```bash
-cd depshield
-```
+Si no tienes git, descargalo de https://git-scm.com/download/win e instalalo con las opciones por defecto.
 
 ---
 
-## PASO 3: Borrar el entorno virtual viejo (si existe)
+## PASO 4: Configuracion automatica
 
-Si hay una carpeta `.venv` que se creo con una version vieja de Python, borrala:
+He preparado un script que hace todo automaticamente. Ejecuta:
 
-```bash
-rm -rf .venv
+```powershell
+.\setup.bat
 ```
 
-Esto no borra nada del proyecto, solo el entorno virtual (que se va a recrear).
+Esto va a:
+1. Borrar el entorno virtual viejo si existe
+2. Crear uno nuevo con tu Python
+3. Instalar todas las dependencias
+4. Verificar que todo funciona
+
+**Si el script funciona sin errores, ya estas listo. Puedes ir directamente a "Como trabajar en el dia a dia".**
+
+Si el script falla o prefieres hacerlo a mano, sigue con el PASO 5.
 
 ---
 
-## PASO 4: Crear el entorno virtual con Python 3.11+
+## PASO 5 (manual, solo si el script fallo): Configurar a mano
 
-Ejecuta UNO de estos comandos, dependiendo de cual te funcione (el primero que NO de error):
+### 5a. Borrar entorno virtual viejo (si existe la carpeta .venv):
 
-**Opcion A** (si `python3` ya es 3.11+):
-```bash
-python3 -m venv .venv
+```powershell
+Remove-Item -Recurse -Force .venv
 ```
 
-**Opcion B** (si instalaste Python 3.12 con brew):
-```bash
-python3.12 -m venv .venv
+### 5b. Crear entorno virtual nuevo:
+
+```powershell
+python -m venv .venv
 ```
 
-**Opcion C** (si tienes python3.11):
-```bash
-python3.11 -m venv .venv
-```
+### 5c. Activar el entorno virtual:
 
-**Si te da un error tipo "No module named venv":**
-- En Linux: `sudo apt install python3.12-venv` y vuelve a intentar
-- En macOS con brew: no deberia pasar, pero prueba `brew reinstall python@3.12`
-
----
-
-## PASO 5: Activar el entorno virtual
-
-**En macOS / Linux:**
-```bash
-source .venv/bin/activate
-```
-
-**En Windows (PowerShell):**
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-**En Windows (cmd):**
-```cmd
-.\.venv\Scripts\activate.bat
+**Si te da un error de "execution policy"**, ejecuta esto primero y luego repite el comando de arriba:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-**Como saber que funciono:** Tu prompt de terminal deberia mostrar `(.venv)` al principio. Ejemplo:
+**Como saber que funciono:** Debes ver `(.venv)` al inicio del prompt:
 
 ```
-(.venv) usuario@ordenador depshield %
+(.venv) PS C:\Users\tuusuario\depshield>
 ```
 
-Si no ves `(.venv)`, algo salio mal. Vuelve a intentar el comando de activacion.
+### 5d. Instalar dependencias:
 
----
-
-## PASO 6: Instalar el proyecto y sus dependencias
-
-Con el entorno virtual activado (ves `(.venv)` en el prompt), ejecuta:
-
-```bash
+```powershell
 pip install -e ".[dev]"
 ```
 
-Este comando hace tres cosas:
-1. Instala las dependencias del proyecto: `requests`, `click`, `rich`, `esprima`
-2. Instala las dependencias de desarrollo: `pytest`, `pytest-cov`
-3. Instala `depshield` en modo editable (los cambios que hagas al codigo se reflejan al instante)
+### 5e. Verificar:
 
-**Si te dice "pip: command not found":** Prueba con `pip3` en vez de `pip`, o con `python3 -m pip install -e ".[dev]"`.
-
----
-
-## PASO 7: Verificar que todo funciona
-
-Ejecuta estos comandos uno por uno. **Todos deben funcionar sin errores:**
-
-```bash
+```powershell
 python -c "import click; print('click OK')"
-```
-
-```bash
-python -c "from depshield import __version__; print(f'depshield {__version__} OK')"
-```
-
-```bash
+python -c "from depshield import __version__; print('depshield OK')"
 depshield --version
-```
-
-```bash
 pytest -v
 ```
 
-**Si todo da OK, ya estas listo para trabajar.**
+Si los 4 comandos funcionan, todo esta listo.
 
 ---
 
-## Problemas frecuentes y soluciones
+## Como trabajar en el dia a dia
 
-### "import click" sale en rojo en el IDE
+**Cada vez que abras una terminal nueva** para trabajar en el proyecto, tienes que activar el entorno virtual:
 
-Esto pasa porque el IDE no esta usando el Python del entorno virtual. Solucion:
-
-- **VS Code**: Pulsa `Cmd+Shift+P` (macOS) o `Ctrl+Shift+P` (Windows/Linux), escribe "Python: Select Interpreter", y selecciona el que dice `.venv` o `depshield/.venv/bin/python`.
-- **PyCharm**: Ve a Settings > Project > Python Interpreter > Add Interpreter > Existing > selecciona `.venv/bin/python`.
-
-### "externally-managed-environment" al hacer pip install
-
-Este error aparece en Python 3.12+ en algunas distros Linux. Solucion: asegurate de que tienes el venv activado (ves `(.venv)` en el prompt) antes de hacer pip install. El error sale cuando intentas instalar en el Python del sistema en vez de en el venv.
-
-### El comando `depshield` no se encuentra despues de instalar
-
-Asegurate de que el venv esta activado (`source .venv/bin/activate`). El comando solo existe dentro del venv.
-
-### "pip install -e ." da error de version de Python
-
-Si el error dice algo como "requires Python >=3.11 but you have 3.9", es que creaste el venv con la version equivocada de Python. Vuelve al PASO 3 (borrar venv) y al PASO 4 (crear con la version correcta).
-
----
-
-## Resumen rapido (si ya sabes lo que haces)
-
-```bash
-git clone https://github.com/ivanml242/depshield.git
+```powershell
 cd depshield
-python3.12 -m venv .venv
-source .venv/bin/activate
+.\.venv\Scripts\Activate.ps1
+```
+
+Sin activar el venv, los imports no funcionan y `depshield` no se encuentra.
+
+---
+
+## Problemas frecuentes
+
+### "import click" o "from depshield import ..." sale en rojo en el IDE
+
+El IDE no esta usando el Python del entorno virtual.
+
+**Si usas VS Code:**
+1. Pulsa `Ctrl+Shift+P`
+2. Escribe "Python: Select Interpreter"
+3. Selecciona el que dice `.venv` o `depshield\.venv\Scripts\python.exe`
+
+**Si usas PyCharm:**
+1. Ve a File > Settings > Project > Python Interpreter
+2. Click en el engranaje > Add > Existing Environment
+3. Busca `.venv\Scripts\python.exe`
+
+### `python --version` sigue diciendo 3.9 despues de instalar 3.12
+
+Windows tiene varias versiones de Python y usa la primera que encuentra en el PATH. Soluciones:
+
+1. **Opcion rapida:** Usa `py -3.12` en vez de `python`:
+   ```powershell
+   py -3.12 -m venv .venv
+   ```
+
+2. **Opcion definitiva:** Abre "Configuracion del sistema" > busca "Variables de entorno" > en la variable PATH, mueve la ruta de Python 3.12 ARRIBA de la de Python 3.9.
+
+### Error "execution policy" al activar el venv
+
+Ejecuta esto una sola vez:
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+### Se abre la Microsoft Store al escribir `python`
+
+Windows tiene un alias que redirige a la Store. Para quitarlo:
+1. Abre Configuracion > Aplicaciones > Alias de ejecucion de aplicaciones
+2. Desactiva los alias de "python.exe" y "python3.exe"
+
+### "pip install -e ." dice "requires Python >=3.11"
+
+Creaste el venv con Python 3.9/3.10. Borra el venv y crealo de nuevo:
+```powershell
+Remove-Item -Recurse -Force .venv
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest -v
 ```
