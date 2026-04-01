@@ -548,7 +548,165 @@ git push origin main
 
 ---
 
-## 6. Estado actual del proyecto
+## 6. PASO 3 — Descarga de código fuente de paquetes
+
+**Objetivo:** Crear un módulo capaz de descargar el código fuente de cualquier paquete (npm o PyPI) dado su nombre y versión, extraerlo en un directorio temporal para su análisis posterior, y limpiar los ficheros temporales una vez finalizado el proceso.
+
+### 6.1. Módulo creado: `depshield/downloaders/package_downloader.py`
+
+Se creó el subpaquete `depshield/downloaders/`:
+
+```
+depshield/downloaders/
+├── __init__.py
+└── package_downloader.py
+```
+
+Este módulo actúa como puente entre los resolvers (PASO 1 y 2) y los analizadores estáticos (PASO 4 y 5). Los resolvers proporcionan el nombre y la versión exacta de cada dependencia; el downloader descarga el código fuente para que los analizadores puedan inspeccionarlo.
+
+### 6.2. Obtención de URLs de descarga
+
+Cada ecosistema tiene su propia forma de exponer las URLs de descarga del código fuente:
+
+**npm:** El endpoint `GET registry.npmjs.org/{name}` incluye, para cada versión, un campo `versions[version].dist.tarball` con la URL directa al fichero `.tgz`. Solo se necesita una petición HTTP.
+
+```python
+def _get_npm_tarball_url(name: str, version: str) -> str:
+    url = f"https://registry.npmjs.org/{name}"
+    data = requests.get(url).json()
+    return data["versions"][version]["dist"]["tarball"]
+```
+
+**PyPI:** El endpoint `GET pypi.org/pypi/{name}/{version}/json` devuelve un campo `urls` que es una lista de distribuciones disponibles. Un paquete puede tener múltiples formatos de distribución. Se implementó una estrategia de prioridad con fallback:
+
+1. **sdist** (`.tar.gz`) → preferido, contiene el código fuente original
+2. **Archivo `.zip`** → alternativa equivalente
+3. **wheel** (`.whl`) → último recurso (es un zip con código ya procesado)
+
+```python
+def _get_pypi_sdist_url(name: str, version: str) -> str | None:
+    data = requests.get(f"https://pypi.org/pypi/{name}/{version}/json").json()
+    for entry in data["urls"]:
+        if entry["packagetype"] == "sdist":    # Preferido
+            return entry["url"]
+    for entry in data["urls"]:
+        if entry["filename"].endswith((".tar.gz", ".zip")):  # Fallback
+            return entry["url"]
+    for entry in data["urls"]:
+        if entry["packagetype"] == "bdist_wheel":  # Último recurso
+            return entry["url"]
+    return None
+```
+
+### 6.3. Extracción segura de archivos
+
+La extracción de archivos descargados de Internet es un vector de ataque conocido (CVE-2007-4559, "path traversal via tarball"). Un atacante puede incluir en un `.tar.gz` ficheros con rutas como `../../../etc/passwd` que, al extraerse, sobrescriben ficheros fuera del directorio de destino.
+
+Se implementaron dos medidas de seguridad:
+
+1. **Filtrado de miembros:** Antes de extraer, se descartan todos los miembros cuyo nombre empiece por `/` (ruta absoluta) o contenga `..` (path traversal).
+2. **Filtro `data` de Python 3.12+:** Se usa `tar.extractall(filter="data")`, que es el mecanismo nativo de Python para extracción segura (descarta permisos especiales, dispositivos, symlinks peligrosos, etc.).
+
+```python
+def _download_and_extract(download_url: str, dest_dir: str) -> Path:
+    content = requests.get(download_url).content
+
+    if download_url.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tar:
+            members = [
+                m for m in tar.getmembers()
+                if not m.name.startswith("/") and ".." not in m.name
+            ]
+            tar.extractall(path=dest, members=members, filter="data")
+
+    elif download_url.endswith((".zip", ".whl")):
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            safe_names = [
+                n for n in zf.namelist()
+                if not n.startswith("/") and ".." not in n
+            ]
+            for name in safe_names:
+                zf.extract(name, path=dest)
+```
+
+### 6.4. Clase `PackageDownloader`
+
+Se diseñó una clase que encapsula todo el flujo de descarga y proporciona gestión automática del ciclo de vida de los ficheros temporales:
+
+```python
+class PackageDownloader:
+    def __init__(self):
+        self._temp_dirs: list[str] = []
+
+    def download(self, name: str, version: str, *, ecosystem: str) -> Path:
+        """Descarga y extrae el código fuente. Devuelve la ruta al directorio."""
+        temp_dir = tempfile.mkdtemp(prefix=f"depshield_{name}_{version}_")
+        self._temp_dirs.append(temp_dir)
+        url = ...  # Según el ecosistema
+        _download_and_extract(url, temp_dir)
+        return Path(temp_dir)
+
+    def cleanup(self):
+        """Borra todos los directorios temporales creados."""
+        for d in self._temp_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        self._temp_dirs.clear()
+```
+
+La clase también implementa el protocolo de **context manager** de Python (`__enter__` / `__exit__`), lo que permite usar la sintaxis `with` para garantizar que los temporales se limpian automáticamente incluso si ocurre una excepción:
+
+```python
+with PackageDownloader() as dl:
+    src_dir = dl.download("is-odd", "3.0.1", ecosystem="npm")
+    # ... analizar ficheros en src_dir ...
+# Al salir del bloque 'with', se llama automáticamente a dl.cleanup()
+```
+
+### 6.5. Flujo completo: resolver → downloader
+
+Ejemplo de integración de los tres primeros módulos:
+
+```python
+from depshield.resolvers.npm_resolver import resolve_from_package_json
+from depshield.downloaders.package_downloader import PackageDownloader
+
+# PASO 1: Resolver el árbol de dependencias
+nodes = resolve_from_package_json("package.json", max_depth=2)
+
+# PASO 3: Descargar el código fuente de cada dependencia
+with PackageDownloader() as dl:
+    for node in nodes[0].flatten():
+        src_dir = dl.download(node.name, node.version, ecosystem="npm")
+        print(f"Descargado {node.name}@{node.version} → {src_dir}")
+        # PASO 4/5: Aquí irán los analizadores estáticos
+```
+
+### 6.6. Verificación
+
+Se crearon 7 tests de integración que descargaron paquetes reales:
+
+| Categoría | Tests | Descripción |
+|---|---|---|
+| URL resolution | 2 | Obtener URL del tarball de npm (`is-odd`) y sdist de PyPI (`six`) |
+| Descarga + extracción | 2 | Descargar y verificar que se extraen ficheros reales (package.json para npm, .py para PyPI) |
+| Cleanup | 2 | Verificar que `cleanup()` y el context manager borran los temporales |
+| Múltiples descargas | 1 | Descargar npm + PyPI simultáneamente, verificar que son directorios distintos |
+
+**Resultado:** 7/7 PASSED en 4.63 segundos.
+
+Se detectó y corrigió un `DeprecationWarning` de Python 3.14 relacionado con `tarfile.extractall()`: se añadió el parámetro `filter="data"` para usar el nuevo mecanismo de extracción segura nativo.
+
+### 6.7. Commit
+
+```powershell
+git add .
+git commit -m "PASO 3: Package downloader for npm tarballs and PyPI sdists with safe extraction"
+git push origin main
+```
+
+---
+
+## 7. Estado actual del proyecto
 
 > **Última actualización:** 1 de abril de 2026
 
@@ -559,10 +717,13 @@ depshield/
 ├── depshield/
 │   ├── __init__.py               # v0.1.0
 │   ├── cli.py                    # CLI con click (scan stub)
-│   └── resolvers/
+│   ├── resolvers/
+│   │   ├── __init__.py
+│   │   ├── npm_resolver.py       # ✅ PASO 1
+│   │   └── pypi_resolver.py      # ✅ PASO 2
+│   └── downloaders/
 │       ├── __init__.py
-│       ├── npm_resolver.py       # ✅ PASO 1
-│       └── pypi_resolver.py      # ✅ PASO 2
+│       └── package_downloader.py  # ✅ PASO 3
 ├── tests/
 │   └── __init__.py
 ├── .venv/                        # Entorno virtual
@@ -580,8 +741,8 @@ depshield/
 | ~~0~~ | ~~Proyecto base~~ | ✅ Completado |
 | ~~1~~ | ~~npm resolver~~ | ✅ Completado |
 | ~~2~~ | ~~PyPI resolver~~ | ✅ Completado |
-| **3** | **Downloader** | ⏳ Pendiente |
-| 4 | JS analyzer | ⏳ Pendiente |
+| ~~3~~ | ~~Downloader~~ | ✅ Completado |
+| **4** | **JS analyzer** | ⏳ Pendiente |
 | 5 | Python analyzer | ⏳ Pendiente |
 | 6 | Metadata analyzer | ⏳ Pendiente |
 | 7 | Scorer + Report | ⏳ Pendiente |
