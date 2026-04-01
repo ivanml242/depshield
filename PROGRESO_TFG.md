@@ -346,7 +346,211 @@ git push origin main
 
 ---
 
-## 5. Estado actual del proyecto
+## 5. PASO 2 — Resolución de dependencias PyPI
+
+**Objetivo:** Crear un módulo análogo al npm resolver, pero para el ecosistema Python. Debe ser capaz de leer un fichero `requirements.txt`, consultar la API pública de PyPI, parsear el campo `requires_dist` de cada paquete para determinar sus dependencias transitivas, y construir el árbol completo de forma recursiva.
+
+### 5.1. Módulo creado: `depshield/resolvers/pypi_resolver.py`
+
+Se añadió al subpaquete `depshield/resolvers/`:
+
+```
+depshield/resolvers/
+├── __init__.py
+├── npm_resolver.py       # ✅ PASO 1
+└── pypi_resolver.py      # ✅ PASO 2
+```
+
+Se reutiliza el modelo de datos `DependencyNode` definido en el PASO 1 (`npm_resolver.py`), garantizando una interfaz uniforme entre ambos resolvers. Esto permite que los módulos posteriores (downloader, analyzers, scorer) trabajen con la misma estructura de datos independientemente del ecosistema.
+
+### 5.2. Parser de `requirements.txt`
+
+El fichero `requirements.txt` es el estándar de facto para declarar dependencias en proyectos Python. A diferencia de `package.json` (que es JSON estructurado), `requirements.txt` es un fichero de texto plano con una sintaxis más libre y variable. Se implementó un parser basado en expresiones regulares que soporta los formatos más comunes:
+
+| Formato | Ejemplo | Interpretación |
+|---|---|---|
+| Nombre sin versión | `requests` | Se resolverá a la última versión estable |
+| Pinned (fija) | `requests==2.31.0` | Versión exacta |
+| Mínima | `requests>=2.20` | Cualquier versión ≥ 2.20 |
+| Compatible release | `flask~=2.3` | Equivale a `>=2.3, ==2.*` (mismo major) |
+| Comentarios | `# esto es un comentario` | Se ignoran |
+| Flags de pip | `-e .` o `--index-url ...` | Se ignoran (líneas que empiezan con `-`) |
+
+```python
+_REQ_LINE_RE = re.compile(
+    r"""
+    ^
+    \s*
+    (?P<name>[A-Za-z0-9_][A-Za-z0-9._-]*)   # nombre del paquete
+    \s*
+    (?:
+        (?P<op>~=|==|!=|>=|<=|>|<)           # operador de versión
+        \s*
+        (?P<version>[^\s;#,]+)               # string de versión
+    )?
+    """,
+    re.VERBOSE,
+)
+```
+
+### 5.3. API de PyPI
+
+A diferencia de npm (que devuelve todo el catálogo de versiones en una sola petición), la API JSON de PyPI ofrece dos endpoints relevantes:
+
+```
+# Metadata general del paquete (incluye lista de todas las versiones publicadas)
+GET https://pypi.org/pypi/{nombre}/json
+
+# Metadata de una versión específica (incluye requires_dist con las dependencias)
+GET https://pypi.org/pypi/{nombre}/{version}/json
+```
+
+Esto tiene una implicación directa en el rendimiento: para cada paquete se necesitan **dos peticiones HTTP** (una para conocer las versiones disponibles y otra para obtener las dependencias de la versión resuelta). En npm bastaba con una sola petición porque el campo `versions` del endpoint general ya incluye las dependencias de cada versión.
+
+Se implementó el mismo mecanismo de **rate limiting** (1 segundo entre peticiones) del PASO 1 para respetar los límites de las APIs públicas.
+
+### 5.4. Parser de `requires_dist`
+
+El campo `requires_dist` de la API de PyPI es una lista de strings que describe las dependencias de un paquete. Su formato varía significativamente entre paquetes y versiones, lo que supuso el mayor reto técnico de este paso. Ejemplos reales encontrados:
+
+```python
+# Formato con paréntesis (paquetes antiguos)
+"urllib3 (>=1.21.1,<3)"
+
+# Formato sin paréntesis (paquetes modernos, ej. requests 2.33+)
+"charset_normalizer<4,>=2"
+
+# Dependencia opcional (extra) – debe ser IGNORADA
+'PySocks (!=1.5.7,>=1.5.6) ; extra == "socks"'
+
+# Dependencia sin versión
+"certifi"
+```
+
+La regex del parser tuvo que actualizarse durante el desarrollo para soportar ambas variantes (con y sin paréntesis), ya que la primera versión solo manejaba el formato con paréntesis y fallaba al resolver las dependencias de paquetes como `requests@2.33.1`:
+
+```python
+_REQUIRES_DIST_RE = re.compile(
+    r"""
+    ^
+    (?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)
+    \s*
+    (?:
+        \((?P<version_paren>[^)]*)\)                    # con paréntesis
+        |
+        (?P<version_bare>(?:[<>=!~]+[^;,\s]+           # sin paréntesis
+            (?:\s*,\s*[<>=!~]+[^;,\s]+)*))
+    )?
+    (?:\s*;\s*(?P<marker>.*))?                          # marcadores de entorno
+    $
+    """,
+    re.VERBOSE,
+)
+```
+
+Las dependencias con marcadores de tipo `extra == "..."` se descartan porque representan dependencias opcionales que no se instalan por defecto (ej. `requests[socks]` instala `PySocks`, pero `pip install requests` a secas no lo hace).
+
+### 5.5. Resolución de versiones
+
+El ecosistema PyPI utiliza PEP 440 para la especificación de versiones, que difiere de semver (usado en npm). Se implementó un resolutor que cubre los operadores más frecuentes:
+
+| Operador | Ejemplo | Significado |
+|---|---|---|
+| `==` | `==2.31.0` | Versión exacta |
+| `!=` | `!=1.5.7` | Excluir una versión concreta |
+| `>=` | `>=2.20` | Mínimo |
+| `<=` | `<=3.0` | Máximo |
+| `>` | `>1.0` | Estrictamente mayor |
+| `<` | `<4.0` | Estrictamente menor |
+| `~=` | `~=2.3` | Compatible release: `>=2.3, ==2.*` |
+| Compuesto | `>=1.0,<2.0` | Múltiples restricciones separadas por coma |
+
+A diferencia del PASO 1 (donde el resolutor se implementó en una sola función `_best_match()`), aquí se separó la lógica en dos funciones para manejar la complejidad de los especificadores compuestos:
+
+- `_version_matches_single(version, spec)` → evalúa un solo operador.
+- `_resolve_version(versions, spec)` → maneja especificadores compuestos (con coma), llamando a `_version_matches_single()` para cada parte.
+
+### 5.6. Resolución recursiva del árbol
+
+La función `resolve_tree()` sigue el mismo patrón que el PASO 1, con una diferencia clave: la **profundidad máxima por defecto es 5** (en lugar de 3 en npm). Esto se debe a que los árboles de dependencias en PyPI tienden a ser más profundos pero más estrechos que en npm.
+
+```python
+def resolve_tree(
+    deps: dict[str, str],       # {"requests": ">=2.20", "six": ""}
+    *,
+    max_depth: int = 5,         # Mayor profundidad que npm (árboles más profundos)
+    _visited: set[str] = None,  # Control de ciclos
+    _depth: int = 0,
+    _is_direct: bool = True,
+) -> list[DependencyNode]:
+```
+
+**Algoritmo:**
+1. Para cada dependencia en el diccionario de entrada:
+   a. Primera petición HTTP: obtener todas las versiones disponibles del paquete (`GET /pypi/{name}/json` → campo `releases`).
+   b. Aplicar `_resolve_version()` para seleccionar la versión que satisface el especificador.
+   c. Comprobar el conjunto `_visited` (protección contra ciclos, idéntica al PASO 1).
+   d. Segunda petición HTTP: obtener la metadata de la versión resuelta (`GET /pypi/{name}/{version}/json` → campo `info.requires_dist`).
+   e. Parsear `requires_dist` con `_parse_requires_dist()`, descartando dependencias opcionales.
+   f. Llamar recursivamente a `resolve_tree()` con las dependencias extraídas.
+2. Devolver la lista de `DependencyNode` con hijos populados.
+
+### 5.7. Diferencias clave entre el resolver npm y PyPI
+
+| Aspecto | npm (PASO 1) | PyPI (PASO 2) |
+|---|---|---|
+| Fichero de entrada | `package.json` (JSON) | `requirements.txt` (texto plano) |
+| API de registro | `registry.npmjs.org` | `pypi.org/pypi/` |
+| Peticiones por paquete | 1 (todo en un endpoint) | 2 (versiones + metadata de versión) |
+| Formato de versiones | semver (`^`, `~`, `*`, `\|\|`) | PEP 440 (`==`, `>=`, `~=`, compuestos) |
+| Profundidad por defecto | 3 | 5 |
+| Dependencias opcionales | No aplica | `requires_dist` con `extra ==` → se descartan |
+| Modelo de datos | `DependencyNode` | `DependencyNode` (compartido) |
+
+### 5.8. API pública del módulo
+
+```python
+# Lectura de requirements.txt
+def read_requirements_txt(path) -> dict[str, str]:
+    """Parsea requirements.txt y devuelve {nombre: especificador_version}."""
+
+# Resolución desde diccionario
+def resolve_tree(deps, *, max_depth=5) -> list[DependencyNode]:
+    """Resuelve recursivamente el árbol de dependencias PyPI."""
+
+# Helper de alto nivel
+def resolve_from_requirements_txt(path, *, max_depth=5) -> list[DependencyNode]:
+    """Lee requirements.txt y resuelve el árbol completo en un solo paso."""
+```
+
+### 5.9. Verificación
+
+Se crearon 20 tests unitarios y de integración:
+
+| Categoría | Tests | Descripción |
+|---|---|---|
+| requirements.txt | 4 | Pinned, bare name, comentarios/blancos, compatible release |
+| requires_dist | 4 | Con paréntesis, sin paréntesis, filtrado de extras, lista vacía |
+| Resolución versiones | 8 | Exact, gte, latest, compatible, compound, not-equal, gt, lt |
+| Integración (red) | 4 | `six` (0 deps), `requests` (deps transitivas), ciclos, end-to-end |
+
+**Resultado:** 20/20 PASSED en 11.31 segundos.
+
+El test de `requests` fue especialmente revelador: en la primera ejecución falló porque `requests@2.33.1` usa el formato `requires_dist` sin paréntesis, lo que obligó a actualizar la regex del parser para soportar ambas variantes. Este tipo de incompatibilidad en el formato de los metadatos es un ejemplo real de las dificultades de trabajar con registros de paquetes públicos.
+
+### 5.10. Commit
+
+```powershell
+git add .
+git commit -m "PASO 2: PyPI dependency resolver with requires_dist parsing and cycle protection"
+git push origin main
+```
+
+---
+
+## 6. Estado actual del proyecto
+
+> **Última actualización:** 1 de abril de 2026
 
 ### Estructura de ficheros
 
@@ -357,7 +561,8 @@ depshield/
 │   ├── cli.py                    # CLI con click (scan stub)
 │   └── resolvers/
 │       ├── __init__.py
-│       └── npm_resolver.py       # ✅ PASO 1 completado
+│       ├── npm_resolver.py       # ✅ PASO 1
+│       └── pypi_resolver.py      # ✅ PASO 2
 ├── tests/
 │   └── __init__.py
 ├── .venv/                        # Entorno virtual
@@ -374,8 +579,8 @@ depshield/
 |---|---|---|
 | ~~0~~ | ~~Proyecto base~~ | ✅ Completado |
 | ~~1~~ | ~~npm resolver~~ | ✅ Completado |
-| **2** | **PyPI resolver** | ⏳ Pendiente |
-| 3 | Downloader | ⏳ Pendiente |
+| ~~2~~ | ~~PyPI resolver~~ | ✅ Completado |
+| **3** | **Downloader** | ⏳ Pendiente |
 | 4 | JS analyzer | ⏳ Pendiente |
 | 5 | Python analyzer | ⏳ Pendiente |
 | 6 | Metadata analyzer | ⏳ Pendiente |
