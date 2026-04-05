@@ -1,6 +1,10 @@
 """Command-line interface for depshield."""
 
+import json
+import sys
+
 import click
+from rich.console import Console
 
 from depshield import __version__
 
@@ -50,14 +54,42 @@ def main():
     default=False,
     help="Only analyze direct dependencies.",
 )
-def scan(path, output_format, ecosystem, no_cache, max_depth, only_direct):
+@click.option(
+    "--output",
+    "output_file",
+    type=click.Path(),
+    default=None,
+    help="Save JSON report to file.",
+)
+def scan(path, output_format, ecosystem, no_cache, max_depth, only_direct, output_file):
     """Scan a project directory for malicious dependencies.
 
     PATH is the project directory to scan (defaults to current directory).
     """
-    click.echo(f"depshield v{__version__}")
-    click.echo(f"Scanning: {path}")
-    click.echo("Scanner not yet implemented. Coming in PASO 8.")
+    from depshield.core.scanner import scan_project
+    from depshield.scoring.report import save_json
+
+    console = Console()
+    console.print(f"[bold]depshield[/bold] v{__version__}\n")
+
+    scores = scan_project(
+        path,
+        ecosystem=ecosystem,
+        use_cache=not no_cache,
+        max_depth=max_depth,
+        only_direct=only_direct,
+        output_format=output_format,
+        console=console,
+    )
+
+    # Save JSON report to file if requested
+    if output_file:
+        save_json(scores, output_file)
+        console.print(f"\n[dim]Report saved to {output_file}[/dim]")
+
+    # Exit with non-zero code if any HIGH_RISK packages found
+    if any(s.classification == "HIGH_RISK" for s in scores):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

