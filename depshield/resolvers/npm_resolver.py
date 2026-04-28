@@ -1,7 +1,7 @@
 """npm dependency resolver.
 
-Reads a package.json file, queries the public npm registry API,
-resolves semver constraints, and builds the full transitive dependency tree.
+Queries the npm registry, resolves semver constraints, and builds
+the transitive dependency tree for a given package.json.
 """
 
 import json
@@ -12,10 +12,6 @@ from pathlib import Path
 
 import requests
 
-
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
 
 @dataclass
 class DependencyNode:
@@ -38,9 +34,7 @@ class DependencyNode:
         return f"DependencyNode({self.name}@{self.version}, children={child_count})"
 
 
-# ---------------------------------------------------------------------------
-# Semver helpers  (basic: exact, ^caret, ~tilde, >=, ranges with ||)
-# ---------------------------------------------------------------------------
+# Semver matching helpers
 
 def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
     """Parse '1.2.3' into (1, 2, 3). Non-numeric parts are ignored."""
@@ -153,9 +147,7 @@ def _best_match(versions: list[str], spec: str) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# npm registry client (with rate limiting)
-# ---------------------------------------------------------------------------
+# npm registry client
 
 _NPM_REGISTRY = "https://registry.npmjs.org"
 _last_request_time: float = 0.0
@@ -179,9 +171,7 @@ def _fetch_package_metadata(package_name: str) -> dict:
     return response.json()
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def read_package_json(path: str | Path) -> dict[str, str]:
     """Read a package.json and return merged dependencies + devDependencies."""

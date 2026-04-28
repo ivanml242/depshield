@@ -1,17 +1,12 @@
 """Metadata analyzer for npm and PyPI packages.
 
-Evaluates package metadata for suspicious signals that may indicate
-a malicious or untrustworthy package, without inspecting source code.
+Checks package metadata (age, downloads, repo, maintainers, etc.)
+for signals that may indicate a suspicious or untrustworthy package.
+This runs independently of source code analysis.
 
-Detects 8 signal types:
-  1. YOUNG_PACKAGE       — First published < 30 days ago
-  2. LOW_DOWNLOADS       — Weekly downloads < 100 (npm) or < 50 (PyPI)
-  3. NO_REPOSITORY       — Missing repository / homepage URL
-  4. SINGLE_MAINTAINER   — Only one maintainer with no history
-  5. VERSION_ANOMALY     — >5 versions published within 24 h
-  6. TYPOSQUATTING       — Name within Levenshtein distance ≤ 2 of a popular package
-  7. NO_LICENSE          — No license defined
-  8. DESCRIPTION_MISMATCH — No description or very short (< 10 chars)
+Detected signals: YOUNG_PACKAGE, LOW_DOWNLOADS, NO_REPOSITORY,
+SINGLE_MAINTAINER, VERSION_ANOMALY, TYPOSQUATTING, NO_LICENSE,
+DESCRIPTION_MISMATCH.
 """
 
 from __future__ import annotations
@@ -24,9 +19,7 @@ import requests
 from depshield.analyzers.js_analyzer import Finding
 
 
-# ---------------------------------------------------------------------------
-# Popular packages lists (top 100 each)
-# ---------------------------------------------------------------------------
+# Popular packages (used for typosquatting detection)
 
 _POPULAR_NPM = {
     "lodash", "chalk", "react", "express", "commander", "moment", "debug",
@@ -73,9 +66,7 @@ _POPULAR_PYPI = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Levenshtein distance
-# ---------------------------------------------------------------------------
+# Levenshtein distance (for typosquatting)
 
 def _levenshtein(a: str, b: str) -> int:
     """Compute the Levenshtein edit distance between two strings."""
@@ -98,9 +89,7 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
-# ---------------------------------------------------------------------------
 # Individual signal checks
-# ---------------------------------------------------------------------------
 
 def _check_young_package(metadata: dict[str, Any], pkg_name: str) -> list[Finding]:
     """YOUNG_PACKAGE: first published < 30 days ago."""
@@ -264,9 +253,7 @@ def _check_description_mismatch(metadata: dict[str, Any], pkg_name: str) -> list
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Metadata fetchers
-# ---------------------------------------------------------------------------
+# Registry fetchers
 
 def fetch_npm_metadata(name: str) -> dict[str, Any]:
     """Fetch metadata for an npm package from the registry.
@@ -358,9 +345,7 @@ def fetch_pypi_metadata(name: str) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def analyze_metadata(
     metadata: dict[str, Any],

@@ -1,7 +1,7 @@
-"""Main orchestrator for depshield.
+"""Main scanner: orchestrates the full analysis pipeline.
 
-Ties together resolvers, downloader, analyzers, scorer and report
-into a single ``scan_project()`` entry point.
+Glues together resolvers, downloader, analyzers, scorer and report
+into a single scan_project() call.
 """
 
 from __future__ import annotations
@@ -31,22 +31,20 @@ from depshield.scoring.report import print_report, save_json, to_json
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Cache
-# ---------------------------------------------------------------------------
+# -- Cache --
 
 _CACHE_DIR = Path.home() / ".depshield" / "cache"
 _CACHE_VERSION = "1"  # bump when heuristics change
 
 
 def _cache_key(name: str, version: str) -> str:
-    """Deterministic cache key for a package+version."""
+    """Build a short hash that identifies a cached result."""
     raw = f"{name}@{version}@v{_CACHE_VERSION}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def _load_cached(name: str, version: str) -> list[Finding] | None:
-    """Load cached findings, or None if miss."""
+    """Try to load findings from the cache. Returns None on miss."""
     key = _cache_key(name, version)
     path = _CACHE_DIR / f"{key}.json"
     if not path.exists():
@@ -68,7 +66,7 @@ def _load_cached(name: str, version: str) -> list[Finding] | None:
 
 
 def _save_cache(name: str, version: str, findings: list[Finding]) -> None:
-    """Persist findings to the cache."""
+    """Store findings on disk for later reuse."""
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     key = _cache_key(name, version)
     path = _CACHE_DIR / f"{key}.json"
@@ -85,12 +83,10 @@ def _save_cache(name: str, version: str, findings: list[Finding]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
-# Ecosystem detection
-# ---------------------------------------------------------------------------
+# -- Ecosystem detection --
 
 def detect_ecosystems(project_dir: Path) -> list[str]:
-    """Auto-detect which ecosystems are present in a project directory."""
+    """Check which lock/manifest files exist in the project."""
     ecosystems: list[str] = []
     if (project_dir / "package.json").exists():
         ecosystems.append("npm")
@@ -99,9 +95,7 @@ def detect_ecosystems(project_dir: Path) -> list[str]:
     return ecosystems
 
 
-# ---------------------------------------------------------------------------
-# Dependency parsing helpers
-# ---------------------------------------------------------------------------
+# -- Dependency file parsers --
 
 def _read_npm_deps(project_dir: Path) -> dict[str, str]:
     """Read dependencies from package.json."""
@@ -132,9 +126,7 @@ def _read_pypi_deps(project_dir: Path) -> dict[str, str]:
     return deps
 
 
-# ---------------------------------------------------------------------------
-# Main orchestrator
-# ---------------------------------------------------------------------------
+# -- Main pipeline --
 
 def scan_project(
     project_dir: str | Path,
@@ -146,30 +138,11 @@ def scan_project(
     output_format: str = "table",
     console: Console | None = None,
 ) -> list[PackageScore]:
-    """Scan a project for malicious dependencies.
+    """Run the full scan pipeline on a project directory.
 
-    Parameters
-    ----------
-    project_dir:
-        Path to the project directory containing package.json and/or
-        requirements.txt.
-    ecosystem:
-        Which ecosystem to scan: "npm", "pypi", or "auto" (detect both).
-    use_cache:
-        Whether to use the result cache (~/.depshield/cache/).
-    max_depth:
-        Maximum depth for dependency tree resolution.
-    only_direct:
-        If True, only analyze direct dependencies (depth=1).
-    output_format:
-        "table" for rich terminal output, "json" for JSON.
-    console:
-        Optional Rich console (for testing / output redirection).
-
-    Returns
-    -------
-    list[PackageScore]
-        Scored results for all packages found.
+    Detects ecosystems, resolves dependency trees, downloads source,
+    runs static analysis + metadata checks, scores everything, and
+    prints or returns the results.
     """
     console = console or Console()
     project_dir = Path(project_dir).resolve()

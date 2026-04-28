@@ -1,16 +1,10 @@
 """JavaScript static analyzer.
 
-Analyzes JavaScript source files for signals of malicious behavior using
-esprima AST parsing with regex fallback for modern JS/JSX that esprima
-cannot parse.
+Scans .js files for suspicious patterns using esprima for AST parsing,
+with a regex fallback for files esprima can't handle (JSX, etc.).
 
-Detects 6 signal types:
-  1. NETWORK_CALLS    — HTTP requests, fetch, axios, etc.
-  2. ENV_ACCESS       — process.env, process.argv access
-  3. FILE_SENSITIVE   — Access to .ssh, .npmrc, .aws, /etc/passwd, etc.
-  4. CODE_EXECUTION   — eval(), Function(), child_process.exec/spawn
-  5. OBFUSCATION      — Base64 decoding, hex strings, String.fromCharCode
-  6. INSTALL_SCRIPTS  — preinstall/postinstall scripts in package.json
+Detected signals: NETWORK_CALLS, ENV_ACCESS, FILE_SENSITIVE,
+CODE_EXECUTION, OBFUSCATION, INSTALL_SCRIPTS.
 """
 
 import json
@@ -19,9 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
 
 @dataclass
 class Finding:
@@ -40,9 +31,6 @@ class Finding:
         )
 
 
-# ---------------------------------------------------------------------------
-# AST analysis with esprima
-# ---------------------------------------------------------------------------
 
 def _walk_ast(node: dict) -> list[dict]:
     """Recursively yield all AST nodes."""
@@ -74,7 +62,7 @@ def _get_node_name(node: dict) -> str:
     return ""
 
 
-# --- Signal: NETWORK_CALLS ---
+# -- NETWORK_CALLS --
 
 _NETWORK_NAMES = {
     "fetch", "XMLHttpRequest",
@@ -112,7 +100,7 @@ def _check_network_ast(node: dict, source_lines: list[str], filepath: str) -> li
     return findings
 
 
-# --- Signal: ENV_ACCESS ---
+# -- ENV_ACCESS --
 
 _ENV_PATTERNS = {"process.env", "process.argv"}
 
@@ -129,7 +117,7 @@ def _check_env_ast(node: dict, source_lines: list[str], filepath: str) -> list[F
     return findings
 
 
-# --- Signal: FILE_SENSITIVE ---
+# -- FILE_SENSITIVE --
 
 _SENSITIVE_PATHS = [
     ".ssh", ".npmrc", ".env", ".aws", ".gnupg",
@@ -155,7 +143,7 @@ def _check_file_sensitive_ast(node: dict, source_lines: list[str], filepath: str
     return findings
 
 
-# --- Signal: CODE_EXECUTION ---
+# -- CODE_EXECUTION --
 
 _EXEC_NAMES = {
     "eval", "Function",
@@ -201,7 +189,7 @@ def _check_code_execution_ast(node: dict, source_lines: list[str], filepath: str
     return findings
 
 
-# --- Signal: OBFUSCATION ---
+# -- OBFUSCATION --
 
 _HEX_RE = re.compile(r"[0-9a-fA-F]{50,}")
 
@@ -251,9 +239,7 @@ def _check_obfuscation_ast(node: dict, source_lines: list[str], filepath: str) -
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Regex fallback (for files esprima cannot parse)
-# ---------------------------------------------------------------------------
+# -- Regex fallback (when esprima can't parse the file) --
 
 _REGEX_PATTERNS: list[tuple[str, str, str, re.Pattern[str]]] = [
     # (signal_type, severity, description, pattern)
@@ -299,9 +285,7 @@ def _analyze_with_regex(source: str, filepath: str) -> list[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Install scripts detection
-# ---------------------------------------------------------------------------
+# -- Install scripts in package.json --
 
 _DANGEROUS_SCRIPTS = {"preinstall", "postinstall", "preuninstall"}
 
@@ -328,15 +312,10 @@ def _check_install_scripts(package_json_path: Path, filepath: str) -> list[Findi
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# -- Public API --
 
 def analyze_file(filepath: str | Path, source: str | None = None) -> list[Finding]:
-    """Analyze a single JavaScript file for malicious signals.
-
-    Uses esprima AST parsing first; falls back to regex if parsing fails.
-    """
+    """Analyze a single JS file. Tries esprima first, falls back to regex."""
     filepath = Path(filepath)
     rel_path = str(filepath)
 

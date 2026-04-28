@@ -1,8 +1,7 @@
-"""Report generator for depshield scan results.
+"""Report generator.
 
-Generates two output formats:
-  1. Rich terminal table (colored, human-readable)
-  2. JSON (machine-readable, for CI/CD integration)
+Outputs scan results in two formats: a colored terminal table
+via Rich, or a JSON document suitable for CI/CD pipelines.
 """
 
 from __future__ import annotations
@@ -19,9 +18,7 @@ from rich.text import Text
 from depshield.scoring.scorer import PackageScore
 
 
-# ---------------------------------------------------------------------------
-# Color / style helpers
-# ---------------------------------------------------------------------------
+# Colores y estilos para la tabla de resultados
 
 _CLASSIFICATION_STYLES = {
     "SAFE": "bold green",
@@ -30,11 +27,11 @@ _CLASSIFICATION_STYLES = {
     "HIGH_RISK": "bold red",
 }
 
-_CLASSIFICATION_EMOJI = {
-    "SAFE": "✅",
-    "LOW_RISK": "⚠️",
-    "MEDIUM_RISK": "🟠",
-    "HIGH_RISK": "🔴",
+_CLASSIFICATION_LABEL = {
+    "SAFE": "[ok]",
+    "LOW_RISK": "[!]",
+    "MEDIUM_RISK": "[!!]",
+    "HIGH_RISK": "[!!!]",
 }
 
 _SEVERITY_STYLES = {
@@ -44,23 +41,15 @@ _SEVERITY_STYLES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Terminal report (rich)
-# ---------------------------------------------------------------------------
-
 def print_report(scores: list[PackageScore], *, console: Console | None = None) -> None:
-    """Print a rich terminal report of scan results.
-
-    Shows a summary panel followed by a detailed table of all packages,
-    with direct dependencies first and findings sorted by severity.
-    """
+    """Print scan results as a colored table in the terminal."""
     console = console or Console()
 
     if not scores:
         console.print("[dim]No packages to report.[/dim]")
         return
 
-    # --- Summary ---
+    # Panel resumen
     total = len(scores)
     high_risk = sum(1 for s in scores if s.classification == "HIGH_RISK")
     medium_risk = sum(1 for s in scores if s.classification == "MEDIUM_RISK")
@@ -68,19 +57,19 @@ def print_report(scores: list[PackageScore], *, console: Console | None = None) 
     safe = sum(1 for s in scores if s.classification == "SAFE")
 
     summary = Text()
-    summary.append(f"  📦 {total} packages scanned\n")
+    summary.append(f"  {total} packages scanned\n")
     if high_risk:
-        summary.append(f"  🔴 {high_risk} HIGH RISK\n", style="bold red")
+        summary.append(f"  [!!!] {high_risk} HIGH RISK\n", style="bold red")
     if medium_risk:
-        summary.append(f"  🟠 {medium_risk} MEDIUM RISK\n", style="bold dark_orange")
+        summary.append(f"  [!!]  {medium_risk} MEDIUM RISK\n", style="bold dark_orange")
     if low_risk:
-        summary.append(f"  ⚠️  {low_risk} LOW RISK\n", style="bold yellow")
+        summary.append(f"  [!]   {low_risk} LOW RISK\n", style="bold yellow")
     if safe:
-        summary.append(f"  ✅ {safe} SAFE\n", style="bold green")
+        summary.append(f"  [ok]  {safe} SAFE\n", style="bold green")
 
     console.print(Panel(summary, title="[bold]depshield scan results[/bold]", border_style="blue"))
 
-    # --- Package table ---
+    # Tabla detallada
     table = Table(
         title="Package Risk Scores",
         show_lines=True,
@@ -94,36 +83,33 @@ def print_report(scores: list[PackageScore], *, console: Console | None = None) 
     table.add_column("Findings", max_width=60)
 
     for s in scores:
-        # Score cell with color
         score_style = _CLASSIFICATION_STYLES.get(s.classification, "")
         score_text = Text(str(s.score), style=score_style)
 
-        # Risk cell
-        emoji = _CLASSIFICATION_EMOJI.get(s.classification, "")
-        risk_text = Text(f"{emoji} {s.classification}", style=score_style)
+        label = _CLASSIFICATION_LABEL.get(s.classification, "")
+        risk_text = Text(f"{label} {s.classification}", style=score_style)
 
-        # Dependency type
         dep_type = "direct" if s.is_direct else "transitive"
 
-        # Findings summary
-        findings_parts: list[str] = []
+        # Resumen de findings por severidad
+        parts: list[str] = []
         if s.high_count:
-            findings_parts.append(f"🔴 {s.high_count} HIGH")
+            parts.append(f"{s.high_count} HIGH")
         if s.medium_count:
-            findings_parts.append(f"🟡 {s.medium_count} MEDIUM")
+            parts.append(f"{s.medium_count} MEDIUM")
         if s.low_count:
-            findings_parts.append(f"⚪ {s.low_count} LOW")
-        findings_text = ", ".join(findings_parts) if findings_parts else "—"
+            parts.append(f"{s.low_count} LOW")
+        findings_text = ", ".join(parts) if parts else "-"
 
         table.add_row(s.name, s.version, dep_type, score_text, risk_text, findings_text)
 
     console.print(table)
 
-    # --- Detailed findings for risky packages ---
+    # Detalle de los paquetes con riesgo
     risky = [s for s in scores if s.classification != "SAFE"]
     if risky:
         console.print()
-        console.print("[bold]Detailed findings for risky packages:[/bold]")
+        console.print("[bold]Detailed findings:[/bold]")
         console.print()
 
         for s in risky:
@@ -141,16 +127,10 @@ def print_report(scores: list[PackageScore], *, console: Console | None = None) 
             console.print()
 
 
-# ---------------------------------------------------------------------------
-# JSON report
-# ---------------------------------------------------------------------------
+# Salida JSON
 
 def to_json(scores: list[PackageScore]) -> dict[str, Any]:
-    """Convert scan results to a JSON-serializable dictionary.
-
-    Useful for CI/CD integration, saving results to disk, or piping
-    to other tools.
-    """
+    """Convert scan results to a JSON-serializable dict."""
     total = len(scores)
     high_risk = sum(1 for s in scores if s.classification == "HIGH_RISK")
     medium_risk = sum(1 for s in scores if s.classification == "MEDIUM_RISK")
@@ -187,7 +167,7 @@ def to_json(scores: list[PackageScore]) -> dict[str, Any]:
 
 
 def save_json(scores: list[PackageScore], path: str | Path) -> Path:
-    """Save scan results as a JSON file."""
+    """Write scan results to a JSON file on disk."""
     path = Path(path)
     data = to_json(scores)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")

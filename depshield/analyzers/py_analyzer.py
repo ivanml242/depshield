@@ -1,15 +1,9 @@
 """Python static analyzer.
 
-Analyzes Python source files for signals of malicious behavior using
-the built-in ``ast`` module (no external dependencies).
+Scans .py files for suspicious patterns using the built-in ast module.
 
-Detects 6 signal types:
-  1. NETWORK_CALLS    — urllib, requests, http.client, socket, httpx
-  2. ENV_ACCESS       — os.environ, os.getenv, subprocess with env
-  3. FILE_SENSITIVE   — Access to ~/.ssh, ~/.aws, /etc/passwd, etc.
-  4. CODE_EXECUTION   — eval, exec, compile, os.system, subprocess, __import__
-  5. OBFUSCATION      — base64.b64decode, codecs.decode, marshal.loads, long hex
-  6. INSTALL_HOOKS    — setup.py cmdclass overriding install/develop
+Detected signals: NETWORK_CALLS, ENV_ACCESS, FILE_SENSITIVE,
+CODE_EXECUTION, OBFUSCATION, INSTALL_HOOKS.
 """
 
 import ast
@@ -19,9 +13,7 @@ from pathlib import Path
 from depshield.analyzers.js_analyzer import Finding
 
 
-# ---------------------------------------------------------------------------
-# AST analysis helpers
-# ---------------------------------------------------------------------------
+
 
 def _get_call_name(node: ast.Call) -> str:
     """Extract a dotted name from a Call node's func attribute."""
@@ -56,9 +48,7 @@ def _snippet(source_lines: list[str], lineno: int) -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Signal: NETWORK_CALLS
-# ---------------------------------------------------------------------------
+# -- NETWORK_CALLS --
 
 _NETWORK_MODULES = {
     "urllib", "urllib.request", "urllib.parse",
@@ -104,9 +94,7 @@ def _check_network(tree: ast.AST, source_lines: list[str], filepath: str) -> lis
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Signal: ENV_ACCESS
-# ---------------------------------------------------------------------------
+# -- ENV_ACCESS --
 
 _ENV_CALLS = {"os.environ", "os.getenv", "os.environ.get"}
 
@@ -136,9 +124,7 @@ def _check_env(tree: ast.AST, source_lines: list[str], filepath: str) -> list[Fi
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Signal: FILE_SENSITIVE
-# ---------------------------------------------------------------------------
+# -- FILE_SENSITIVE --
 
 _SENSITIVE_PATTERNS = [
     ".ssh", ".aws", ".env", ".gnupg", ".npmrc",
@@ -166,9 +152,7 @@ def _check_file_sensitive(tree: ast.AST, source_lines: list[str], filepath: str)
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Signal: CODE_EXECUTION
-# ---------------------------------------------------------------------------
+# -- CODE_EXECUTION --
 
 _EXEC_CALLS = {
     "eval", "exec", "compile",
@@ -194,9 +178,7 @@ def _check_code_execution(tree: ast.AST, source_lines: list[str], filepath: str)
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Signal: OBFUSCATION
-# ---------------------------------------------------------------------------
+# -- OBFUSCATION --
 
 _OBFUSCATION_CALLS = {
     "base64.b64decode", "base64.decodebytes",
@@ -243,9 +225,7 @@ def _check_obfuscation(tree: ast.AST, source_lines: list[str], filepath: str) ->
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Signal: INSTALL_HOOKS (setup.py cmdclass)
-# ---------------------------------------------------------------------------
+# -- INSTALL_HOOKS (setup.py) --
 
 _DANGEROUS_CMDCLASS = {"install", "develop", "egg_info", "sdist", "build_py"}
 
@@ -290,15 +270,10 @@ def _check_install_hooks(tree: ast.AST, source_lines: list[str], filepath: str) 
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# -- Public API --
 
 def analyze_file(filepath: str | Path, source: str | None = None) -> list[Finding]:
-    """Analyze a single Python file for malicious signals.
-
-    Uses the built-in ``ast`` module — no external dependencies needed.
-    """
+    """Analyze a single Python file for suspicious patterns via AST."""
     filepath = Path(filepath)
     rel_path = str(filepath)
 

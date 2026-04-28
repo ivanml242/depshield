@@ -1,9 +1,8 @@
 """PyPI dependency resolver.
 
-Reads a requirements.txt file, queries the public PyPI JSON API,
-parses ``requires_dist`` for transitive dependencies, and builds
-the full dependency tree reusing the same DependencyNode model as
-the npm resolver.
+Queries the PyPI JSON API, resolves version constraints from
+requirements.txt and requires_dist, and builds the transitive
+dependency tree.
 """
 
 import re
@@ -15,9 +14,7 @@ import requests
 from depshield.resolvers.npm_resolver import DependencyNode
 
 
-# ---------------------------------------------------------------------------
 # requirements.txt parser
-# ---------------------------------------------------------------------------
 
 _REQ_LINE_RE = re.compile(
     r"""
@@ -63,9 +60,7 @@ def read_requirements_txt(path: str | Path) -> dict[str, str]:
     return deps
 
 
-# ---------------------------------------------------------------------------
 # requires_dist parser
-# ---------------------------------------------------------------------------
 
 _REQUIRES_DIST_RE = re.compile(
     r"""
@@ -109,9 +104,7 @@ def _parse_requires_dist(requires_dist: list[str]) -> dict[str, str]:
     return deps
 
 
-# ---------------------------------------------------------------------------
-# PyPI registry client (with rate limiting)
-# ---------------------------------------------------------------------------
+# PyPI registry client
 
 _PYPI_BASE = "https://pypi.org/pypi"
 _last_request_time: float = 0.0
@@ -142,9 +135,7 @@ def _fetch_package_metadata(package_name: str, version: str = "") -> dict:
     return response.json()
 
 
-# ---------------------------------------------------------------------------
-# Version resolution helpers
-# ---------------------------------------------------------------------------
+# Version resolution
 
 def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
     """Parse ``1.2.3`` into ``(1, 2, 3)``."""
@@ -229,9 +220,7 @@ def _version_matches_single(version: str, spec: str) -> bool:
     return v == _parse_version_tuple(spec)
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def resolve_tree(
     deps: dict[str, str],

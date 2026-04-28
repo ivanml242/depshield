@@ -1,18 +1,10 @@
-"""Risk scorer for package findings.
+"""Risk scoring for analyzed packages.
 
-Receives findings from all three analyzers (JS, Python, metadata) for a
-single package and computes a risk score (0–100) with a risk classification.
+Takes findings from the analyzers and computes a numeric score (0-100)
+with a risk classification. Higher score = more suspicious.
 
-Scoring weights:
-  - HIGH   finding: +25 points
-  - MEDIUM finding: +10 points
-  - LOW    finding: +3  points
-
-Risk classification:
-  - 0–10:   SAFE        (green)
-  - 11–30:  LOW_RISK    (yellow)
-  - 31–60:  MEDIUM_RISK (orange)
-  - 61–100: HIGH_RISK   (red)
+Weights: HIGH +25, MEDIUM +10, LOW +3.
+Brackets: 0-10 SAFE, 11-30 LOW_RISK, 31-60 MEDIUM_RISK, 61+ HIGH_RISK.
 """
 
 from __future__ import annotations
@@ -22,9 +14,7 @@ from dataclasses import dataclass, field
 from depshield.analyzers.js_analyzer import Finding
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+# Puntos por severidad
 
 _SEVERITY_WEIGHTS = {
     "HIGH": 25,
@@ -35,13 +25,9 @@ _SEVERITY_WEIGHTS = {
 _MAX_SCORE = 100
 
 
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
-
 @dataclass
 class PackageScore:
-    """Risk assessment result for a single package."""
+    """Result of scoring a single package."""
 
     name: str
     version: str
@@ -71,12 +57,9 @@ class PackageScore:
         return sum(1 for f in self.findings if f.severity == "LOW")
 
 
-# ---------------------------------------------------------------------------
-# Classification
-# ---------------------------------------------------------------------------
 
 def _classify(score: int) -> str:
-    """Map a numeric score to a risk classification."""
+    """Turn a numeric score into a risk label."""
     if score <= 10:
         return "SAFE"
     if score <= 30:
@@ -86,10 +69,6 @@ def _classify(score: int) -> str:
     return "HIGH_RISK"
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def score_package(
     name: str,
     version: str,
@@ -97,23 +76,10 @@ def score_package(
     *,
     is_direct: bool = True,
 ) -> PackageScore:
-    """Compute the risk score for a single package.
+    """Compute the risk score for one package.
 
-    Parameters
-    ----------
-    name:
-        Package name.
-    version:
-        Resolved version string.
-    findings:
-        Combined list of findings from JS, Python, and metadata analyzers.
-    is_direct:
-        Whether this is a direct dependency (True) or transitive (False).
-
-    Returns
-    -------
-    PackageScore
-        The scored result with classification and sorted findings.
+    Sums up the severity weights for each finding, caps at 100,
+    sorts findings by severity, and returns a PackageScore.
     """
     # Calculate raw score
     raw_score = sum(_SEVERITY_WEIGHTS.get(f.severity, 0) for f in findings)
@@ -136,17 +102,11 @@ def score_package(
 def score_all(
     packages: list[tuple[str, str, list[Finding], bool]],
 ) -> list[PackageScore]:
-    """Score multiple packages at once.
+    """Score a batch of packages.
 
-    Parameters
-    ----------
-    packages:
-        List of (name, version, findings, is_direct) tuples.
-
-    Returns
-    -------
-    list[PackageScore]
-        Scored results sorted: direct deps first, then by score descending.
+    Expects a list of (name, version, findings, is_direct) tuples.
+    Returns the results sorted: direct deps first, then by score
+    (highest first).
     """
     scores = [
         score_package(name, version, findings, is_direct=is_direct)

@@ -1,4 +1,4 @@
-"""Command-line interface for depshield."""
+"""CLI entry point for depshield."""
 
 import json
 import sys
@@ -12,13 +12,7 @@ from depshield import __version__
 @click.group()
 @click.version_option(version=__version__, prog_name="depshield")
 def main():
-    """depshield - Detect malicious dependencies before installation.
-
-    Analyzes package.json and/or requirements.txt, resolves the full
-    transitive dependency tree, downloads source code, performs static
-    analysis looking for malicious behaviors, evaluates package metadata,
-    and generates a risk report with per-package scoring.
-    """
+    """depshield -- find malicious dependencies before you install them."""
 
 
 @main.command()
@@ -82,12 +76,12 @@ def scan(path, output_format, ecosystem, no_cache, max_depth, only_direct, outpu
         console=console,
     )
 
-    # Save JSON report to file if requested
+    # Save to file if requested
     if output_file:
         save_json(scores, output_file)
         console.print(f"\n[dim]Report saved to {output_file}[/dim]")
 
-    # Exit with non-zero code if any HIGH_RISK packages found
+    # Non-zero exit when something looks dangerous
     if any(s.classification == "HIGH_RISK" for s in scores):
         sys.exit(1)
 

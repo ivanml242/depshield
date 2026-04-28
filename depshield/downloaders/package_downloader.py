@@ -1,8 +1,7 @@
-"""Package downloader for npm and PyPI packages.
+"""Package downloader.
 
-Downloads source tarballs/sdists from npm and PyPI registries,
-extracts them into temporary directories for analysis, and provides
-cleanup utilities to remove temporary files when done.
+Downloads tarballs/sdists from npm and PyPI, extracts them to
+temporary directories, and cleans up when done.
 """
 
 import io
@@ -15,9 +14,7 @@ from pathlib import Path
 import requests
 
 
-# ---------------------------------------------------------------------------
-# npm registry helpers
-# ---------------------------------------------------------------------------
+# npm helpers
 
 _NPM_REGISTRY = "https://registry.npmjs.org"
 
@@ -44,9 +41,7 @@ def _get_npm_tarball_url(name: str, version: str) -> str:
     return tarball_url
 
 
-# ---------------------------------------------------------------------------
 # PyPI helpers
-# ---------------------------------------------------------------------------
 
 _PYPI_BASE = "https://pypi.org/pypi"
 
@@ -84,9 +79,7 @@ def _get_pypi_sdist_url(name: str, version: str) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Download & extract
-# ---------------------------------------------------------------------------
+# Download and extraction
 
 def _download_and_extract(download_url: str, dest_dir: str) -> Path:
     """Download an archive from *download_url* and extract it into *dest_dir*.
@@ -140,19 +133,12 @@ def _download_and_extract(download_url: str, dest_dir: str) -> Path:
     return dest
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 class PackageDownloader:
-    """Downloads and extracts package source code for analysis.
+    """Downloads and extracts package source code into temp dirs.
 
-    Usage
-    -----
-    >>> dl = PackageDownloader()
-    >>> src_dir = dl.download("is-odd", "3.0.1", ecosystem="npm")
-    >>> # ... analyze files in src_dir ...
-    >>> dl.cleanup()
+    Use as a context manager so temp files get cleaned up automatically.
     """
 
     def __init__(self) -> None:
