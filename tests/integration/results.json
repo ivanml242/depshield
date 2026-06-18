@@ -1,0 +1,53 @@
+{
+  "metrics": {
+    "true_positives": 0,
+    "false_negatives": 0,
+    "true_negatives": 4,
+    "false_positives": 0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1_score": 0.0
+  },
+  "details": [
+    {
+      "name": "is-odd",
+      "version": "3.0.1",
+      "ecosystem": "npm",
+      "expected": "legitimate",
+      "score": 0,
+      "classification": "SAFE",
+      "detected": false,
+      "findings_count": 4
+    },
+    {
+      "name": "minimist",
+      "version": "1.2.8",
+      "ecosystem": "npm",
+      "expected": "legitimate",
+      "score": 0,
+      "classification": "SAFE",
+      "detected": false,
+      "findings_count": 4
+    },
+    {
+      "name": "six",
+      "version": "1.16.0",
+      "ecosystem": "pypi",
+      "expected": "legitimate",
+      "score": 9,
+      "classification": "SAFE",
+      "detected": false,
+      "findings_count": 6
+    },
+    {
+      "name": "charset-normalizer",
+      "version": "3.3.2",
+      "ecosystem": "pypi",
+      "expected": "legitimate",
+      "score": 9,
+      "classification": "SAFE",
+      "detected": false,
+      "findings_count": 4
+    }
+  ]
+}

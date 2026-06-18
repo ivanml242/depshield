@@ -3,7 +3,7 @@
 Takes findings from the analyzers and computes a numeric score (0-100)
 with a risk classification. Higher score = more suspicious.
 
-Weights: HIGH +25, MEDIUM +10, LOW +3.
+Weights: HIGH +25, MEDIUM +10, LOW +3, TRUST -20.
 Brackets: 0-10 SAFE, 11-30 LOW_RISK, 31-60 MEDIUM_RISK, 61+ HIGH_RISK.
 """
 
@@ -20,6 +20,7 @@ _SEVERITY_WEIGHTS = {
     "HIGH": 25,
     "MEDIUM": 10,
     "LOW": 3,
+    "TRUST": -20,
 }
 
 _MAX_SCORE = 100
@@ -78,22 +79,45 @@ def score_package(
 ) -> PackageScore:
     """Compute the risk score for one package.
 
-    Sums up the severity weights for each finding, caps at 100,
-    sorts findings by severity, and returns a PackageScore.
-    """
-    # Calculate raw score
-    raw_score = sum(_SEVERITY_WEIGHTS.get(f.severity, 0) for f in findings)
-    capped_score = min(raw_score, _MAX_SCORE)
+    Scoring works in two phases:
 
-    # Sort findings by severity: HIGH → MEDIUM → LOW
-    severity_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-    sorted_findings = sorted(findings, key=lambda f: severity_order.get(f.severity, 3))
+    1. **Risk phase**: sum the weights of all non-TRUST findings
+       (HIGH +25, MEDIUM +10, LOW +3), capped at 100.
+    2. **Trust phase**: each TRUST finding applies a 30 % discount
+       to the risk score, compounding multiplicatively.
+
+    Example: a package with 4 HIGH code findings (raw = 100) and
+    3 TRUST indicators gets 100 × 0.70³ ≈ 34 → MEDIUM_RISK.
+    """
+    # Phase 1: risk score from code + metadata findings
+    code_findings = [f for f in findings if f.severity != "TRUST"]
+    trust_findings = [f for f in findings if f.severity == "TRUST"]
+
+    # Deduplicate for scoring: same signal_type in same file counts once.
+    # All findings are still kept in the report for transparency.
+    seen: set[tuple[str, str]] = set()
+    unique_risk = 0
+    for f in code_findings:
+        key = (f.signal_type, f.file)
+        if key not in seen:
+            seen.add(key)
+            unique_risk += _SEVERITY_WEIGHTS.get(f.severity, 0)
+    capped_risk = min(unique_risk, _MAX_SCORE)
+
+    # Phase 2: trust discount (each TRUST finding = 30% reduction)
+    trust_multiplier = 0.70 ** len(trust_findings)
+    final_score = int(capped_risk * trust_multiplier)
+    final_score = max(final_score, 0)
+
+    # Sort findings by severity: HIGH → MEDIUM → LOW → TRUST
+    severity_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "TRUST": 3}
+    sorted_findings = sorted(findings, key=lambda f: severity_order.get(f.severity, 4))
 
     return PackageScore(
         name=name,
         version=version,
-        score=capped_score,
-        classification=_classify(capped_score),
+        score=final_score,
+        classification=_classify(final_score),
         findings=sorted_findings,
         is_direct=is_direct,
     )

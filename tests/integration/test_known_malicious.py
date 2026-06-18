@@ -92,8 +92,14 @@ def _extract_package_info(osv: dict) -> tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _package_exists_npm(name: str) -> bool:
-    """Return True if the package is still published on npm."""
+def _package_exists_npm(name: str) -> bool | str:
+    """Return True if the package is still published on npm.
+
+    Returns the string ``'security_placeholder'`` when npm has replaced
+    the malicious package with an empty security stub (version
+    ``0.0.1-security``).  Returns False if the package has been fully
+    removed.
+    """
     try:
         r = requests.get(
             f"https://registry.npmjs.org/{name}",
@@ -105,6 +111,11 @@ def _package_exists_npm(name: str) -> bool:
         # Some removed packages return {"error": "Not found"}
         if "error" in data:
             return False
+        # Detect security placeholders: npm replaces malicious packages
+        # with a single version "0.0.1-security" containing no code.
+        latest = data.get("dist-tags", {}).get("latest", "")
+        if "security" in latest.lower():
+            return "security_placeholder"
         return True
     except Exception:
         return False
@@ -205,7 +216,7 @@ _LEGITIMATE_PACKAGES = [
     ("npm", "minimist", "1.2.8"),
     # PyPI
     ("pypi", "six", "1.16.0"),
-    ("pypi", "click", "8.1.7"),
+    ("pypi", "charset-normalizer", "3.3.2"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -306,6 +317,14 @@ class TestKnownMalicious:
 
         if not exists:
             pytest.skip(f"{name} has been removed from {ecosystem} registry")
+            return
+
+        # npm replaces malicious packages with security placeholders
+        if exists == "security_placeholder":
+            pytest.skip(
+                f"{name} replaced by npm with security placeholder "
+                f"(malicious code removed from registry)"
+            )
             return
 
         score = _analyze_package(name, version, ecosystem)

@@ -347,6 +347,66 @@ def fetch_pypi_metadata(name: str) -> dict[str, Any]:
 
 # Public API
 
+def _check_trust_indicators(metadata: dict[str, Any], pkg_name: str) -> list[Finding]:
+    """Emit TRUST findings for well-established packages.
+
+    When a package has positive indicators (repository, license, age,
+    multiple maintainers), it gets trust credits that offset suspicious
+    code patterns. This reduces false positives on popular packages that
+    legitimately use eval(), subprocess, etc.
+    """
+    findings: list[Finding] = []
+
+    # Has a public repository
+    repo = metadata.get("repository") or metadata.get("homepage") or ""
+    if repo.strip():
+        findings.append(Finding(
+            "TRUSTED_REPO", "TRUST", pkg_name, 0,
+            "Has a public repository",
+        ))
+
+    # Has a license
+    license_val = metadata.get("license") or ""
+    if license_val.strip():
+        findings.append(Finding(
+            "TRUSTED_LICENSE", "TRUST", pkg_name, 0,
+            f"Has license: {license_val.strip()[:50]}",
+        ))
+
+    # Has multiple maintainers
+    maintainers = metadata.get("maintainers", [])
+    if isinstance(maintainers, list) and len(maintainers) > 1:
+        findings.append(Finding(
+            "TRUSTED_MAINTAINERS", "TRUST", pkg_name, 0,
+            f"{len(maintainers)} maintainers",
+        ))
+
+    # Package is old (> 365 days)
+    created = metadata.get("created")
+    if created:
+        try:
+            if isinstance(created, str):
+                created_dt = _dt.datetime.fromisoformat(
+                    created.replace("Z", "+00:00")
+                )
+            elif isinstance(created, _dt.datetime):
+                created_dt = created
+            else:
+                created_dt = None
+
+            if created_dt:
+                age_days = (_dt.datetime.now(_dt.timezone.utc) - created_dt).days
+                if age_days > 365:
+                    findings.append(Finding(
+                        "TRUSTED_AGE", "TRUST", pkg_name, 0,
+                        f"Package is {age_days} days old",
+                    ))
+        except (ValueError, TypeError):
+            pass
+
+    return findings
+
+
 def analyze_metadata(
     metadata: dict[str, Any],
     pkg_name: str,
@@ -375,4 +435,5 @@ def analyze_metadata(
     findings.extend(_check_typosquatting(metadata, pkg_name))
     findings.extend(_check_no_license(metadata, pkg_name))
     findings.extend(_check_description_mismatch(metadata, pkg_name))
+    findings.extend(_check_trust_indicators(metadata, pkg_name))
     return findings

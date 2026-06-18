@@ -195,8 +195,8 @@ class TestScorer:
     def test_score_caps_at_100(self):
         """El score nunca supera 100 aunque haya muchos findings."""
         findings = [
-            Finding("CODE_EXECUTION", "HIGH", "a.js", 1, "eval(x)")
-            for _ in range(10)  # 10 × 25 = 250 → capeado a 100
+            Finding("CODE_EXECUTION", "HIGH", f"file_{i}.js", 1, "eval(x)")
+            for i in range(10)  # 10 × 25 = 250 → capeado a 100
         ]
         result = score_package("evilpkg", "1.0.0", findings)
         assert result.score == 100

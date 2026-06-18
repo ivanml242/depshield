@@ -113,7 +113,7 @@ def _check_env_ast(node: dict, source_lines: list[str], filepath: str) -> list[F
             if name in _ENV_PATTERNS:
                 line = n.get("loc", {}).get("start", {}).get("line", 0)
                 snippet = source_lines[line - 1].strip()[:100] if line > 0 else name
-                findings.append(Finding("ENV_ACCESS", "HIGH", filepath, line, snippet))
+                findings.append(Finding("ENV_ACCESS", "MEDIUM", filepath, line, snippet))
     return findings
 
 
@@ -247,7 +247,7 @@ _REGEX_PATTERNS: list[tuple[str, str, str, re.Pattern[str]]] = [
      re.compile(r"\b(fetch|axios|http\.request|https\.request|XMLHttpRequest)\s*\(", re.I)),
     ("NETWORK_CALLS", "MEDIUM", "URL literal",
      re.compile(r"""["']https?://[^"']+["']""")),
-    ("ENV_ACCESS", "HIGH", "process.env access",
+    ("ENV_ACCESS", "MEDIUM", "process.env access",
      re.compile(r"\bprocess\.(env|argv)\b")),
     ("FILE_SENSITIVE", "HIGH", "sensitive path",
      re.compile(r"""["'].*?(\.ssh|\.npmrc|\.env|\.aws|/etc/passwd|id_rsa).*?["']""", re.I)),
@@ -346,20 +346,34 @@ def analyze_file(filepath: str | Path, source: str | None = None) -> list[Findin
         return _analyze_with_regex(source, rel_path)
 
 
+_SKIP_DIRS = {"test", "tests", "testing", "example", "examples", "doc", "docs",
+              "benchmark", "benchmarks", "__pycache__", "node_modules", ".git"}
+
+
 def analyze_directory(directory: str | Path) -> list[Finding]:
     """Analyze all .js files in a directory tree for malicious signals.
 
     Also checks any package.json files for dangerous install scripts.
+    Skips test, example, doc, and benchmark directories to reduce
+    false positives from legitimate code exercising system APIs.
     """
     directory = Path(directory)
     findings: list[Finding] = []
 
+    def _should_skip(filepath: Path) -> bool:
+        parts = {p.lower() for p in filepath.relative_to(directory).parts[:-1]}
+        return bool(parts & _SKIP_DIRS)
+
     # Analyze all .js files
     for js_file in directory.rglob("*.js"):
+        if _should_skip(js_file):
+            continue
         findings.extend(analyze_file(js_file))
 
     # Check package.json files for install scripts
     for pkg_json in directory.rglob("package.json"):
+        if _should_skip(pkg_json):
+            continue
         rel_path = str(pkg_json)
         findings.extend(_check_install_scripts(pkg_json, rel_path))
 

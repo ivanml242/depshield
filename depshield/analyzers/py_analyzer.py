@@ -106,7 +106,7 @@ def _check_env(tree: ast.AST, source_lines: list[str], filepath: str) -> list[Fi
         if isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id == "os" and node.attr == "environ":
                 findings.append(Finding(
-                    "ENV_ACCESS", "HIGH", filepath,
+                    "ENV_ACCESS", "MEDIUM", filepath,
                     node.lineno,
                     _snippet(source_lines, node.lineno),
                 ))
@@ -116,7 +116,7 @@ def _check_env(tree: ast.AST, source_lines: list[str], filepath: str) -> list[Fi
             name = _get_call_name(node)
             if name in _ENV_CALLS:
                 findings.append(Finding(
-                    "ENV_ACCESS", "HIGH", filepath,
+                    "ENV_ACCESS", "MEDIUM", filepath,
                     node.lineno,
                     _snippet(source_lines, node.lineno),
                 ))
@@ -300,12 +300,28 @@ def analyze_file(filepath: str | Path, source: str | None = None) -> list[Findin
     return findings
 
 
+_SKIP_DIRS = {"test", "tests", "testing", "example", "examples", "doc", "docs",
+              "benchmark", "benchmarks", "__pycache__", "node_modules", ".git"}
+
+
 def analyze_directory(directory: str | Path) -> list[Finding]:
-    """Analyze all .py files in a directory tree for malicious signals."""
+    """Analyze all .py files in a directory tree for malicious signals.
+
+    Skips test, example, doc, and benchmark directories to reduce
+    false positives from legitimate code exercising system APIs.
+    """
     directory = Path(directory)
     findings: list[Finding] = []
 
     for py_file in directory.rglob("*.py"):
+        # Skip files inside non-production directories
+        parts = {p.lower() for p in py_file.relative_to(directory).parts[:-1]}
+        if parts & _SKIP_DIRS:
+            continue
+        # Skip individual test files (test_*.py, *_test.py)
+        fname = py_file.name.lower()
+        if fname.startswith("test_") or fname.endswith("_test.py"):
+            continue
         findings.extend(analyze_file(py_file))
 
     return findings
